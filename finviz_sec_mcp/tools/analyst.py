@@ -10,6 +10,14 @@ from ..clients.finviz_client import FinvizClient
 
 logger = logging.getLogger(__name__)
 client = FinvizClient()
+EARNINGS_NEWS_KEYWORDS = (
+    "earnings",
+    "results",
+    "guidance",
+    "conference call",
+    "transcript",
+    "webcast",
+)
 
 
 def register_analyst_tools(server):
@@ -134,6 +142,58 @@ def register_analyst_tools(server):
                     lines.append(f"▸ [{source}] {headline}")
                     lines.append(f"  {timestamp} — {url}")
                     lines.append("")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        except Exception as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    @server.tool()
+    def get_earnings_news(ticker: str, count: int = 10) -> List[TextContent]:
+        """Get recent earnings-related headlines for a stock.
+        This filters the generic Finviz news feed for earnings, results,
+        guidance, conference call, webcast, and transcript headlines.
+
+        Args:
+            ticker: Stock ticker symbol.
+            count: Number of matching headlines to return (default 10).
+        """
+        try:
+            news = client.get_news(ticker)
+            if not news:
+                return [TextContent(
+                    type="text",
+                    text=f"No news found for {ticker.upper()}",
+                )]
+
+            filtered = []
+            for item in news:
+                if len(item) < 4:
+                    continue
+                headline = item[1]
+                if any(keyword in headline.lower() for keyword in EARNINGS_NEWS_KEYWORDS):
+                    filtered.append(item)
+
+            if not filtered:
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"No earnings-related headlines found for {ticker.upper()} "
+                        "in the current Finviz news feed."
+                    ),
+                )]
+
+            lines = [
+                f"Earnings News for {ticker.upper()}",
+                "=" * 60,
+                "",
+            ]
+
+            for item in filtered[:count]:
+                timestamp, headline, url, source = item[0], item[1], item[2], item[3]
+                lines.append(f"▸ [{source}] {headline}")
+                lines.append(f"  {timestamp} — {url}")
+                lines.append("")
 
             return [TextContent(type="text", text="\n".join(lines))]
 
