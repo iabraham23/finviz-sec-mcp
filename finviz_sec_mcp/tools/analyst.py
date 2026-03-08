@@ -1,6 +1,5 @@
 """
 Analyst Ratings, Insider Activity, and News Tools
-Priorities 5–7 in the value research workflow.
 """
 
 import logging

@@ -1,7 +1,7 @@
 """
 SEC EDGAR API Client
-Free public API — no key required. Rate limit: 10 requests/second.
-Docs: https://www.sec.gov/search-filings/efts-api
+Free public API — no key required. Standard Rate limit: 10 requests/second.
+Docs: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
 """
 
 import logging
@@ -28,8 +28,8 @@ class EdgarClient:
     COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
     SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
     COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-    FULL_TEXT_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index"
-    FILING_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index"
+    FULL_TEXT_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index" #not used yet
+    FILING_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index" #not used yet
     ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data"
 
     def __init__(self):

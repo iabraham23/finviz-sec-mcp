@@ -1,7 +1,5 @@
 """
 SEC Filing Tools
-Priority 3 — free EDGAR integration for 10-K, 10-Q, 8-K filings.
-No API key required.
 """
 
 import logging

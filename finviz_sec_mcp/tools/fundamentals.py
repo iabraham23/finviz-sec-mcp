@@ -1,6 +1,5 @@
 """
 Individual Stock Fundamentals Tools
-Priority 2 — 90+ data points per ticker for deep value analysis.
 """
 
 import logging
@@ -12,7 +11,7 @@ from ..clients.finviz_client import FinvizClient
 logger = logging.getLogger(__name__)
 client = FinvizClient()
 
-# Fields grouped by value-investing relevance
+# Current fields we look at 
 VALUE_FIELDS = [
     "P/E", "Forward P/E", "PEG", "P/S", "P/B", "P/C", "P/FCF",
     "EPS (ttm)", "EPS next Y", "EPS next Q", "EPS past 5Y", "EPS next 5Y",
@@ -58,8 +57,8 @@ def register_fundamentals_tools(server):
 
     @server.tool()
     def get_stock_fundamentals(ticker: str) -> List[TextContent]:
-        """Get comprehensive fundamental data for a stock (90+ metrics).
-        Organized into value-relevant sections for quick analysis.
+        """Get comprehensive fundamental data for a stock.
+        Primarily focused on value-oriented performance as this is my particular interest.
 
         Args:
             ticker: Stock ticker symbol (e.g. "AAPL", "BRK-B").
