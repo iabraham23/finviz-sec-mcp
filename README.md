@@ -4,6 +4,12 @@ A **free** MCP server for stock research using Finviz screening and SEC EDGAR fi
 
 Works with any MCP-compatible client — Claude Desktop, Claude Code, Cursor, Windsurf, Cline, Zed, and more.
 
+## Collaboration Preference
+
+This project is released under the MIT license. If you build on it, I would highly prefer and appreciate active collaboration: fork it on GitHub, work in the open, and contribute improvements back where possible instead of maintaining a disconnected clone.
+
+This is a request about how I would like collaboration to happen, not an additional license restriction.
+
 ## What You Get
 
 **15 tools** accessible conversationally through any MCP client:
@@ -46,7 +52,9 @@ pip3 --version
 
 If you don't have Python 3.10+, install it from [python.org](https://www.python.org/downloads/).
 
-### Step 2: Clone & Install
+### Step 2: Fork, Clone & Install
+
+Preferred workflow: fork this repository on GitHub first, then clone your fork so improvements can flow back cleanly.
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/finviz-sec-mcp.git
@@ -183,3 +191,7 @@ Once set up, you can just talk naturally:
 **SEC EDGAR rate limit** → The client auto-throttles to 10 req/sec. If you hit issues, wait a few seconds.
 
 **Claude Desktop doesn't show the tools** → Double-check the path in `claude_desktop_config.json`. The `command` should point to `venv/bin/finviz-sec-mcp` inside this project, not your system Python.
+
+## License
+
+MIT. See [LICENSE](/Users/ishanabraham/CWC_Work/finviz-sec-mcp/LICENSE).
