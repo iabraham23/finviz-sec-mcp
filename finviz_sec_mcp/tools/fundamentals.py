@@ -3,7 +3,7 @@ Individual Stock Fundamentals Tools
 """
 
 import logging
-from typing import List, Optional
+from typing import List
 from mcp.types import TextContent
 
 from ..clients.finviz_client import FinvizClient

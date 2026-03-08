@@ -5,7 +5,7 @@ Data is delayed 15–20 min -- Support for Elite not available yet
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import finviz
 from finviz.screener import Screener

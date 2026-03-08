@@ -3,7 +3,7 @@ SEC Filing Tools
 """
 
 import logging
-from typing import List, Optional
+from typing import List
 from mcp.types import TextContent
 
 from ..clients.edgar_client import EdgarClient
