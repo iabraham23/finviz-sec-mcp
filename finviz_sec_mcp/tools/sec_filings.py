@@ -1,11 +1,9 @@
 """
 SEC Filing Tools
-Priority 3 — free EDGAR integration for 10-K, 10-Q, 8-K filings.
-No API key required.
 """
 
 import logging
-from typing import List, Optional
+from typing import List
 from mcp.types import TextContent
 
 from ..clients.edgar_client import EdgarClient

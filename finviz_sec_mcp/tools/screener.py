@@ -4,7 +4,7 @@ Finviz-powered screening with 67+ filters.
 """
 
 import logging
-from typing import List, Optional
+from typing import List
 from mcp.types import TextContent
 
 from ..clients.finviz_client import FinvizClient
@@ -21,6 +21,7 @@ def register_screener_tools(server):
         filters: str,
         table: str = "Valuation",
         order: str = "-marketcap",
+        signal: str = "",
         max_results: int = 30,
     ) -> List[TextContent]:
         """Screen stocks using Finviz filter codes. This is the primary tool
@@ -94,6 +95,7 @@ def register_screener_tools(server):
                    Use "Valuation" for value metrics, "Financial" for margins/ROE.
             order: Sort column. Prefix with '-' for descending.
                    e.g. "-marketcap", "pe", "-dividendyield"
+            signal: Optional Finviz signal preset, e.g. "ta_topgainers".
             max_results: Max stocks to return (default 30).
 
         Returns:
@@ -102,7 +104,7 @@ def register_screener_tools(server):
         try:
             filter_list = [f.strip() for f in filters.split(",") if f.strip()]
             results = client.screen(
-                filters=filter_list, table=table, order=order
+                filters=filter_list, table=table, order=order, signal=signal
             )
 
             if not results:
@@ -118,7 +120,8 @@ def register_screener_tools(server):
             lines = [
                 f"Screening Results — {len(results)} stocks",
                 f"Filters: {filters}",
-                f"View: {table} | Sort: {order}",
+                f"View: {table} | Sort: {order}"
+                + (f" | Signal: {signal}" if signal else ""),
                 "=" * 65,
                 "",
             ]

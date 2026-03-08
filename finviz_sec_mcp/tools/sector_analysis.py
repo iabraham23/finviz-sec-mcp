@@ -1,6 +1,5 @@
 """
 Sector & Industry Analysis Tools
-Priority 4 — compare sectors and industries using Finviz screener.
 """
 
 import logging

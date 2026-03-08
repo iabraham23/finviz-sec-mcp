@@ -1,11 +1,11 @@
 """
-Finviz Client — wraps the free `finviz` Python package.
+Utilizes Finviz Client.
 No API key or Elite subscription required.
-Data is delayed 15–20 min (irrelevant for value research).
+Data is delayed 15–20 min -- Support for Elite not available yet  
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import finviz
 from finviz.screener import Screener
