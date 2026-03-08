@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=65.5.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finviz-sec-mcp"
+version = "0.1.0"
+description = "Free MCP server for stock research using Finviz screening and SEC EDGAR filings"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.9.1",
+    "finviz>=2.0.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+finviz-sec-mcp = "finviz_sec_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["finviz_sec_mcp*"]
