@@ -17,8 +17,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Must include contact email per SEC policy
-# Set SEC_EMAIL in your .env file or as an environment variable
-_sec_email = os.getenv("SEC_EMAIL", "your-email@example.com")
+_sec_email = os.getenv("SEC_EMAIL", "ia@cwcgroup.com")
 USER_AGENT = f"FinvizSecMCP {_sec_email}"
 
 

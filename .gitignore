@@ -13,6 +13,9 @@ build/
 # Environment
 .env
 
+# MCPB packaged bundles
+*.mcpb
+
 # macOS
 .DS_Store
 
