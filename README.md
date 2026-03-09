@@ -6,13 +6,12 @@ Works with any MCP-compatible client — Claude Desktop, Claude Code, Cursor, Wi
 
 ## Collaboration Preference
 
-This project is released under the MIT license. If you build on it, I would highly prefer and appreciate active collaboration: fork it on GitHub, work in the open, and contribute improvements back where possible instead of maintaining a disconnected clone.
-
+This project is released under the MIT license. If you build on it, I would highly prefer and appreciate active collaboration
 This is a request about how I would like collaboration to happen, not an additional license restriction.
 
 ## What You Get
 
-**15 tools** accessible conversationally through any MCP client:
+**16 tools** accessible conversationally through any MCP client:
 
 | Tool | What it does |
 |------|-------------|
