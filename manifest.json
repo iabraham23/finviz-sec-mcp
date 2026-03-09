@@ -35,6 +35,7 @@
     { "name": "get_financial_history" },
     { "name": "get_insider_filings" },
     { "name": "compare_sectors" },
+    { "name": "compare_industries" },
     { "name": "screen_industry" },
     { "name": "get_analyst_ratings" },
     { "name": "get_insider_activity" },

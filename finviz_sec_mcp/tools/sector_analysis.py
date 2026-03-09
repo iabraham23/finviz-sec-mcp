@@ -1,5 +1,6 @@
 """
 Sector & Industry Analysis Tools
+Aggregate data from Finviz groups endpoint.
 """
 
 import logging
@@ -11,19 +12,32 @@ from ..clients.finviz_client import FinvizClient
 logger = logging.getLogger(__name__)
 client = FinvizClient()
 
-SECTORS = [
-    ("sec_technology", "Technology"),
-    ("sec_healthcare", "Healthcare"),
-    ("sec_financial", "Financial"),
-    ("sec_consumerdefensive", "Consumer Defensive"),
-    ("sec_consumercyclical", "Consumer Cyclical"),
-    ("sec_industrials", "Industrials"),
-    ("sec_energy", "Energy"),
-    ("sec_utilities", "Utilities"),
-    ("sec_realestate", "Real Estate"),
-    ("sec_basicmaterials", "Basic Materials"),
-    ("sec_communicationservices", "Communication Services"),
-]
+
+def _format_group_table(rows: List[dict], title: str, view: str) -> str:
+    """Format group data into readable output."""
+    if not rows:
+        return f"{title}\n{'=' * 60}\n\nNo data returned."
+
+    lines = [title, "=" * 60, ""]
+
+    for row in rows:
+        name = row.get("Name", "?")
+        no = row.get("No.", "")
+
+        # Skip the row number, show name as header
+        lines.append(f"▸ {name}")
+
+        detail_parts = []
+        for key, val in row.items():
+            if key not in ("No.", "Name") and val:
+                detail_parts.append(f"{key}: {val}")
+
+        for i in range(0, len(detail_parts), 4):
+            chunk = detail_parts[i : i + 4]
+            lines.append(f"  {' | '.join(chunk)}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def register_sector_tools(server):
@@ -31,54 +45,63 @@ def register_sector_tools(server):
 
     @server.tool()
     def compare_sectors(
-        table: str = "Valuation",
-        sort_by: str = "-marketcap",
+        view: str = "overview",
+        order: str = "name",
     ) -> List[TextContent]:
-        """Compare all market sectors by key metrics.
-        Screens one representative sample per sector.
+        """Compare all market sectors with aggregate metrics from Finviz.
+        Returns sector-level aggregates (median P/E, total market cap, etc.)
+        for all 11 sectors in a single view.
 
         Args:
-            table: Metric view — "Valuation", "Financial", "Performance",
-                   "Overview", "Ownership", "Technical".
-            sort_by: Sort order for stocks within each sector. Default "-marketcap".
+            view: Data view to return. Options:
+                "overview"    — Stocks, Market Cap, Dividend, P/E, Fwd P/E,
+                                PEG, LTDebt/Eq, Debt/Eq, Float Short, Recom,
+                                Change, Volume
+                "valuation"   — Market Cap, P/E, Fwd P/E, PEG, P/S, P/B,
+                                P/C, P/FCF, EPS past 5Y, EPS next 5Y,
+                                Sales past 5Y, Change, Volume
+                "performance" — Perf Week, Perf Month, Perf Quart, Perf Half,
+                                Perf Year, Perf YTD, Avg Volume, Rel Volume,
+                                Change, Volume
+            order: Sort column — e.g. "name", "marketcap", "pe",
+                   "change", "volume", "dividendyield".
         """
         try:
-            lines = [
-                "Sector Comparison (top stocks per sector)",
-                f"View: {table}",
-                "=" * 65,
-                "",
-            ]
-
-            for filter_code, sector_name in SECTORS:
-                results = client.screen(
-                    filters=[filter_code, "cap_largeover"],
-                    table=table,
-                    order=sort_by,
-                )
-
-                if not results:
-                    lines.append(f"▸ {sector_name}: No large-cap results")
-                    lines.append("")
-                    continue
-
-                # Show top 3 per sector
-                lines.append(f"▸ {sector_name} ({len(results)} large-cap stocks)")
-                for stock in results[:3]:
-                    ticker = stock.get("Ticker", "?")
-                    company = stock.get("Company", "?")
-                    detail_parts = []
-                    for key, val in stock.items():
-                        if key not in ("No.", "Ticker", "Company") and val:
-                            detail_parts.append(f"{key}: {val}")
-                    detail_str = " | ".join(detail_parts[:5])
-                    lines.append(f"  {ticker} ({company}): {detail_str}")
-                lines.append("")
-
-            return [TextContent(type="text", text="\n".join(lines))]
+            rows = client.get_groups(
+                group="sector", view=view, order=order
+            )
+            title = f"Sector Comparison — {view.title()} View"
+            text = _format_group_table(rows, title, view)
+            return [TextContent(type="text", text=text)]
 
         except Exception as e:
             logger.error(f"compare_sectors error: {e}")
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    @server.tool()
+    def compare_industries(
+        view: str = "overview",
+        order: str = "name",
+    ) -> List[TextContent]:
+        """Compare all industries with aggregate metrics from Finviz.
+        Returns industry-level aggregates for all ~144 industries.
+
+        Args:
+            view: Data view — "overview", "valuation", or "performance".
+                See compare_sectors for column details per view.
+            order: Sort column — e.g. "name", "marketcap", "pe",
+                   "change", "volume", "dividendyield".
+        """
+        try:
+            rows = client.get_groups(
+                group="industry", view=view, order=order
+            )
+            title = f"Industry Comparison — {view.title()} View"
+            text = _format_group_table(rows, title, view)
+            return [TextContent(type="text", text=text)]
+
+        except Exception as e:
+            logger.error(f"compare_industries error: {e}")
             return [TextContent(type="text", text=f"Error: {e}")]
 
     @server.tool()

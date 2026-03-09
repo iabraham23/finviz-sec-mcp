@@ -22,3 +22,6 @@ build/
 # IDE
 .vscode/
 .idea/
+
+# Internal Documents
+IMPROVEMENT_PLAN.md
