@@ -2,7 +2,7 @@
 
 A **free** MCP server for stock research using Finviz screening and SEC EDGAR filings. No paid subscriptions required.
 
-Works with any MCP-compatible client — Claude Desktop, Claude Code, Cursor, Windsurf, Cline, Zed, and more.
+Works with any MCP-compatible client: Claude Desktop, Claude Code, Cursor, Windsurf, Cline, Zed, and more.
 
 ## Collaboration Preference
 
@@ -15,7 +15,7 @@ This is a request about how I would like collaboration to happen, not an additio
 
 | Tool | What it does |
 |------|-------------|
-| `screen_stocks` | Full Finviz screener with 67+ filters — P/E, ROE, margins, debt ratios, etc. |
+| `screen_stocks` | Full Finviz screener with 67+ filters: P/E, ROE, margins, debt ratios, etc. |
 | `screen_value_stocks` | Quick value screen with sensible defaults |
 | `screen_from_url` | Paste any finviz.com screener URL and run it |
 | `list_filter_options` | Discover all available filter codes |
@@ -33,8 +33,8 @@ This is a request about how I would like collaboration to happen, not an additio
 
 ## Data Sources
 
-- **Finviz** (free tier) — Screener, fundamentals, news, insiders, analyst data. Delayed 15–20 min (irrelevant for value research).
-- **SEC EDGAR** (free, public) — 10-K/10-Q/8-K filings, XBRL financial data, insider forms. No API key needed.
+- **Finviz** (free tier): Screener, fundamentals, news, insiders, analyst data. Delayed 15–20 min (irrelevant for value research).
+- **SEC EDGAR** (free, public): 10-K/10-Q/8-K filings, XBRL financial data, insider forms. No API key needed.
 
 ---
 
