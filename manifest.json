@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.2",
   "name": "finviz-sec-mcp",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Free stock research MCP using Finviz and SEC data",
   "author": {
     "name": "Ishan Abraham",
@@ -36,6 +36,7 @@
     { "name": "get_insider_filings" },
     { "name": "compare_sectors" },
     { "name": "compare_industries" },
+    { "name": "stock_vs_industry" },
     { "name": "screen_industry" },
     { "name": "get_analyst_ratings" },
     { "name": "get_insider_activity" },
