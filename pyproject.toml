@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 finviz-sec-mcp = "finviz_sec_mcp.server:main"
+finviz-sec-mcp-remote = "finviz_sec_mcp.remote:main"
 
 [tool.setuptools.packages.find]
 include = ["finviz_sec_mcp*"]

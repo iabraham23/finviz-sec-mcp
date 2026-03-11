@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: finviz-sec-mcp
+    runtime: python
+    branch: main
+    buildCommand: pip install -e .
+    startCommand: finviz-sec-mcp-remote
+    healthCheckPath: /healthz
+    plan: starter
+    envVars:
+      - key: MCP_HOST
+        value: 0.0.0.0
+      - key: MCP_PORT
+        value: 8000
+      - key: MCP_STREAMABLE_HTTP_PATH
+        value: /mcp
+      - key: LOG_LEVEL
+        value: INFO
