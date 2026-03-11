@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.2",
   "name": "finviz-sec-mcp",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Free stock research MCP using Finviz and SEC data",
   "author": {
     "name": "Ishan Abraham",
@@ -23,6 +23,9 @@
       }
     }
   },
+  "notes": {
+    "remote_deployment": "For org-wide usage, prefer the remote FastMCP deployment from GitHub main instead of distributing .mcpb bundles. The remote server can be exposed publicly at the /mcp endpoint."
+  },
   "tools": [
     { "name": "screen_stocks" },
     { "name": "screen_value_stocks" },
@@ -35,6 +38,8 @@
     { "name": "get_financial_history" },
     { "name": "get_insider_filings" },
     { "name": "compare_sectors" },
+    { "name": "compare_industries" },
+    { "name": "stock_vs_industry" },
     { "name": "screen_industry" },
     { "name": "get_analyst_ratings" },
     { "name": "get_insider_activity" },

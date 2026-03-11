@@ -1,12 +1,14 @@
 """
 Utilizes Finviz Client.
 No API key or Elite subscription required.
-Data is delayed 15–20 min -- Support for Elite not available yet  
+Data is delayed 15–20 min -- Support for Elite not available yet
 """
 
 import logging
 from typing import Any, Dict, List
 
+import requests
+from bs4 import BeautifulSoup
 import finviz
 from finviz.screener import Screener
 
@@ -114,6 +116,92 @@ class FinvizClient:
         except Exception as e:
             logger.error(f"Analyst data failed for {ticker}: {e}")
             return []
+
+    # ── Group / sector / industry aggregates ────────────────────────────
+    GROUPS_URL = "https://finviz.com/groups.ashx"
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+
+    # View codes → human labels
+    GROUP_VIEWS = {
+        "overview": "110",
+        "valuation": "120",
+        "performance": "140",
+    }
+
+    # Grouping levels
+    GROUP_TYPES = {
+        "sector": "sector",
+        "industry": "industry",
+        "capitalization": "capitalization",
+        "country": "country",
+    }
+
+    @classmethod
+    def get_groups(
+        cls,
+        group: str = "sector",
+        view: str = "overview",
+        order: str = "name",
+    ) -> List[Dict[str, str]]:
+        """
+        Fetch aggregate data from Finviz groups page.
+
+        Args:
+            group: Grouping level — sector, industry, capitalization, country.
+            view: Data view — overview, valuation, performance.
+            order: Sort column name (e.g. name, marketcap, pe, change).
+
+        Returns:
+            List of dicts, one per group row.
+        """
+        g = cls.GROUP_TYPES.get(group, "sector")
+        v = cls.GROUP_VIEWS.get(view, "110")
+
+        params = {"g": g, "v": v, "o": order}
+
+        try:
+            resp = requests.get(
+                cls.GROUPS_URL, params=params,
+                headers=cls._HEADERS, timeout=15,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            logger.error(f"Groups fetch failed: {e}")
+            return []
+
+        return cls._parse_groups_table(resp.text)
+
+    @staticmethod
+    def _parse_groups_table(html: str) -> List[Dict[str, str]]:
+        """Parse the data table from a Finviz groups page."""
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Find the table with a header row containing "Name"
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+            if len(rows) < 3:
+                continue
+            header_cells = rows[0].find_all(["td", "th"])
+            headers = [c.get_text(strip=True) for c in header_cells]
+            if "Name" not in headers:
+                continue
+
+            results = []
+            for row in rows[1:]:
+                cells = row.find_all("td")
+                if len(cells) != len(headers):
+                    continue
+                values = [c.get_text(strip=True) for c in cells]
+                results.append(dict(zip(headers, values)))
+            return results
+
+        return []
 
     # ── Available filters ──────────────────────────────────────────────
     @staticmethod

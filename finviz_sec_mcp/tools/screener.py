@@ -39,6 +39,8 @@ def register_screener_tools(server):
                   "fa_pfcf_u15,fa_opermargin_o15,fa_epsyoy1_o10"
                       → P/FCF < 15, op margin > 15%, EPS growth > 10%
 
+                USE TOOL: list_filter_options TO SEE ALL FILTERS 
+                
                 COMMON FILTER PREFIXES:
                   cap_     : Market cap (nano/micro/small/mid/large/mega)
                   fa_pe    : P/E ratio (u = under, o = over)
@@ -59,17 +61,12 @@ def register_screener_tools(server):
                   fa_opermargin  : Operating margin
                   fa_netmargin   : Net profit margin
                   fa_div   : Dividend yield
-                  fa_payoutratio : Payout ratio
-                  fa_epsyoy1     : EPS growth this year
                   fa_epsyoy5     : EPS growth past 5 years
-                  fa_epsnextY    : EPS growth next year
                   fa_salesqoq    : Sales growth QoQ
                   sec_     : Sector (technology, healthcare, etc.)
                   ind_     : Industry
                   sh_avgvol: Average volume
                   ta_sma200: Price vs 200-day SMA
-                  ta_rsi   : RSI
-                  idx_sp500: S&P 500 member
 
             table: Data view that controls which columns are returned.
                    Each view returns different metrics per stock:

@@ -17,10 +17,12 @@ dependencies = [
     "finviz>=2.0.0",
     "requests>=2.31.0",
     "python-dotenv>=1.0.0",
+    "beautifulsoup4>=4.12.0",
 ]
 
 [project.scripts]
 finviz-sec-mcp = "finviz_sec_mcp.server:main"
+finviz-sec-mcp-remote = "finviz_sec_mcp.remote:main"
 
 [tool.setuptools.packages.find]
 include = ["finviz_sec_mcp*"]

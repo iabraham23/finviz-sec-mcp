@@ -6,12 +6,13 @@ Works with any MCP-compatible client: Claude Desktop, Claude Code, Cursor, Winds
 
 ## Collaboration Preference
 
-This project is released under the MIT license. If you build on it, I would highly prefer and appreciate active collaboration
+This project is released under the MIT license. If you build on it, I would highly prefer and appreciate active collaboration.
+
 This is a request about how I would like collaboration to happen, not an additional license restriction.
 
 ## What You Get
 
-**16 tools** accessible conversationally through any MCP client:
+**18 tools** accessible conversationally through any MCP client:
 
 | Tool | What it does |
 |------|-------------|
@@ -26,10 +27,13 @@ This is a request about how I would like collaboration to happen, not an additio
 | `get_financial_history` | Historical revenue, net income, EPS from XBRL data |
 | `get_insider_filings` | SEC Form 3/4/5 insider filings |
 | `compare_sectors` | Sector-level comparison |
+| `compare_industries` | Industry aggregate comparison |
+| `stock_vs_industry` | Compare one stock against its industry aggregates |
 | `screen_industry` | Filter within a specific industry |
 | `get_analyst_ratings` | Analyst price targets and ratings |
 | `get_insider_activity` | Insider buy/sell activity |
 | `get_stock_news` | Recent news headlines |
+| `get_earnings_news` | Earnings-related and transcript-related headlines |
 
 ## Data Sources
 
@@ -70,6 +74,12 @@ source venv/bin/activate        # macOS/Linux
 pip install -e .
 ```
 
+For the remote server entrypoint, the package also installs:
+
+```bash
+finviz-sec-mcp-remote
+```
+
 ### Step 3: Configure Environment
 
 Copy the example env file and add your email (required by the SEC for EDGAR API access):
@@ -87,7 +97,7 @@ SEC_EMAIL=your-email@example.com
 ### Step 4: Test It Works
 
 ```bash
-# Quick test — should print "15 tools registered"
+# Quick test — should print the current tool count
 python -c "
 from finviz_sec_mcp.server import server
 print(f'{len(server._tool_manager._tools)} tools registered')
@@ -136,7 +146,47 @@ echo "\"command\": \"$(pwd)/venv/bin/finviz-sec-mcp\""
 ### Step 6: Restart Claude Desktop
 
 Quit and reopen Claude Desktop. You should see a hammer icon (🔨) in the
-chat input area. Click it to see all 15 tools.
+chat input area. Click it to see all 18 tools.
+
+---
+
+## Remote Server Deployment
+
+This repo can also run as a public remote MCP over FastMCP streamable HTTP. That is the preferred setup for org-wide use because the production service can deploy from GitHub `main` and users no longer need `.mcpb` uploads.
+
+### Remote Environment
+
+Set the remote variables from [`.env.example`](/Users/ishanabraham/CWC_Work/finviz-sec-mcp/.env.example):
+
+```bash
+MCP_HOST=0.0.0.0
+MCP_PORT=8000
+MCP_STREAMABLE_HTTP_PATH=/mcp
+SEC_EMAIL=your-email@example.com
+```
+
+### Local Remote Run
+
+```bash
+finviz-sec-mcp-remote
+```
+
+This exposes:
+
+- `/mcp`
+- `/healthz`
+
+### Render Deployment
+
+This repo includes a starter [render.yaml](/Users/ishanabraham/CWC_Work/finviz-sec-mcp/render.yaml) that:
+
+- deploys the web service from GitHub
+- runs `finviz-sec-mcp-remote`
+- health-checks `/healthz`
+
+To keep production tied to GitHub `main`, configure the Render production service to deploy only from the `main` branch. Unpushed local changes will not affect the live server.
+
+This public remote deployment does not require OAuth or a backing database. Anyone with the deployed `/mcp` URL can connect, so put rate limiting or basic WAF rules in front of it if you expect outside traffic.
 
 ---
 
