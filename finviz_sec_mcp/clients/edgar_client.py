@@ -7,8 +7,10 @@ Docs: https://www.sec.gov/search-filings/edgar-application-programming-interface
 import logging
 import os
 import re
+import threading
 import time
 import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from typing import Any, Dict, List, Optional
 
@@ -27,23 +29,111 @@ class EdgarClient:
     COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
     SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
     COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-    FULL_TEXT_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index" #not used 
-    FILING_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index" #not used 
+    COMPANY_CONCEPT_URL = (
+        "https://data.sec.gov/api/xbrl/companyconcept"
+        "/CIK{cik}/{taxonomy}/{concept}.json"
+    )
+    XBRL_FRAMES_URL = (
+        "https://data.sec.gov/api/xbrl/frames"
+        "/{taxonomy}/{concept}/{unit}/{period}.json"
+    )
     ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data"
+
+    # Balance sheet concepts are instantaneous (point-in-time) values.
+    # Income/cash-flow concepts are duration-based.
+    # This matters for the frames endpoint period format.
+    INSTANTANEOUS_CONCEPTS = {
+        "Assets", "Liabilities", "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsAndShortTermInvestments", "Cash",
+        "LongTermDebt", "LongTermDebtNoncurrent",
+        "LongTermDebtAndCapitalLeaseObligations",
+        "CommonStockSharesOutstanding",
+    }
+
+    # ── XBRL concept fallback chains ─────────────────────────────────
+    # After ASC 606 (2018+), many companies switched revenue tags.
+    # When the primary concept doesn't match, try alternatives in order.
+    CONCEPT_ALIASES: Dict[str, List[str]] = {
+        "Revenues": [
+            "Revenues",
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "RevenueFromContractWithCustomerIncludingAssessedTax",
+            "SalesRevenueNet",
+            "SalesRevenueGoodsNet",
+            "SalesRevenueServicesNet",
+        ],
+        "NetIncomeLoss": [
+            "NetIncomeLoss",
+            "NetIncomeLossAvailableToCommonStockholdersBasic",
+            "ProfitLoss",
+        ],
+        "OperatingIncomeLoss": [
+            "OperatingIncomeLoss",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        ],
+        "LongTermDebt": [
+            "LongTermDebt",
+            "LongTermDebtNoncurrent",
+            "LongTermDebtAndCapitalLeaseObligations",
+        ],
+        "CashAndCashEquivalentsAtCarryingValue": [
+            "CashAndCashEquivalentsAtCarryingValue",
+            "CashCashEquivalentsAndShortTermInvestments",
+            "Cash",
+        ],
+        "StockholdersEquity": [
+            "StockholdersEquity",
+            "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        ],
+        # Cash flow concepts (duration-based, like income)
+        "NetCashProvidedByUsedInOperatingActivities": [
+            "NetCashProvidedByOperatingActivities",
+            "NetCashProvidedByUsedInOperatingActivities",
+        ],
+        "NetCashProvidedByUsedInFinancingActivities": [
+            "NetCashProvidedByUsedInFinancingActivities",
+            "NetCashProvidedByFinancingActivities",
+        ],
+        "NetCashProvidedByUsedInInvestingActivities": [
+            "NetCashProvidedByUsedInInvestingActivities",
+            "NetCashProvidedByInvestingActivities",
+        ],
+        "PaymentsOfDividends": [
+            "PaymentsOfDividends",
+            "PaymentsOfDividendsCommonStock",
+            "DividendsCommonStockCash",
+            "PaymentsOfOrdinaryDividends",
+        ],
+        "DepreciationDepletionAndAmortization": [
+            "DepreciationDepletionAndAmortization",
+            "DepreciationAndAmortization",
+            "Depreciation",
+        ],
+        "CapitalExpenditure": [
+            "PaymentsToAcquirePropertyPlantAndEquipment",
+            "PaymentsToAcquireProductiveAssets",
+            "CapitalExpenditureDiscontinuedOperations",
+        ],
+    }
 
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
         self._cik_cache: Dict[str, str] = {}
+        self._cik_cache_populated = False
         self._last_request_time = 0.0
+        self._throttle_lock = threading.Lock()
 
     # ── Rate limiting ──────────────────────────────────────────────────
     def _throttle(self):
-        """Enforce 10 req/sec rate limit."""
-        elapsed = time.time() - self._last_request_time
-        if elapsed < 0.1:
-            time.sleep(0.1 - elapsed)
-        self._last_request_time = time.time()
+        """Enforce 10 req/sec rate limit (thread-safe)."""
+        with self._throttle_lock:
+            elapsed = time.time() - self._last_request_time
+            if elapsed < 0.1:
+                time.sleep(0.1 - elapsed)
+            self._last_request_time = time.time()
 
     def _get(self, url: str, params: Optional[Dict] = None) -> requests.Response:
         self._throttle()
@@ -52,22 +142,42 @@ class EdgarClient:
         return resp
 
     # ── Ticker → CIK resolution ───────────────────────────────────────
-    def get_cik(self, ticker: str) -> Optional[str]:
-        """Resolve a ticker symbol to a zero-padded 10-digit CIK."""
-        ticker = ticker.upper().strip()
-        if ticker in self._cik_cache:
-            return self._cik_cache[ticker]
-
+    def _populate_cik_cache(self) -> None:
+        """Download the full SEC ticker→CIK map and cache all ~10K entries.
+        Only called once (or after a cache-miss retry)."""
         try:
             data = self._get(self.COMPANY_TICKERS_URL).json()
             for entry in data.values():
                 t = entry.get("ticker", "").upper()
                 cik = str(entry.get("cik_str", "")).zfill(10)
                 self._cik_cache[t] = cik
-                if t == ticker:
-                    return cik
+            self._cik_cache_populated = True
         except Exception as e:
-            logger.error(f"CIK lookup failed for {ticker}: {e}")
+            logger.error(f"CIK cache population failed: {e}")
+
+    def get_cik(self, ticker: str) -> Optional[str]:
+        """Resolve a ticker symbol to a zero-padded 10-digit CIK."""
+        ticker = ticker.upper().strip()
+
+        # Fast path: already cached
+        if ticker in self._cik_cache:
+            return self._cik_cache[ticker]
+
+        # First call: populate the entire cache from SEC
+        if not self._cik_cache_populated:
+            self._populate_cik_cache()
+            if ticker in self._cik_cache:
+                return self._cik_cache[ticker]
+
+        # Still not found — try one fresh download in case it's newly listed
+        if self._cik_cache_populated:
+            logger.info(f"CIK miss for {ticker}, retrying with fresh download")
+            self._cik_cache_populated = False
+            self._populate_cik_cache()
+            if ticker in self._cik_cache:
+                return self._cik_cache[ticker]
+
+        logger.warning(f"Ticker {ticker} not found in SEC company tickers")
         return None
 
     # ── Company submissions (filing list) ──────────────────────────────
@@ -127,23 +237,49 @@ class EdgarClient:
             logger.error(f"Failed to get filings for {ticker}: {e}")
             return []
 
-    # ── Company XBRL facts (structured financial data) ─────────────────
-    def get_company_facts(self, ticker: str) -> Optional[Dict[str, Any]]:
+    # ── Single-concept lookup (lightweight) ─────────────────────────
+    def _get_company_concept(
+        self,
+        cik: str,
+        concept: str,
+        taxonomy: str = "us-gaap",
+    ) -> Optional[Dict[str, Any]]:
         """
-        Get XBRL financial facts for a company.
-        Returns structured data including revenue, net income, EPS, assets, etc.
+        Fetch a single XBRL concept for a company via the company-concept
+        endpoint.  Much lighter than downloading the full companyfacts blob.
+        Returns the raw JSON or None on 404 / error.
         """
-        cik = self.get_cik(ticker)
-        if not cik:
+        url = self.COMPANY_CONCEPT_URL.format(
+            cik=cik, taxonomy=taxonomy, concept=concept,
+        )
+        try:
+            return self._get(url).json()
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return None  # concept doesn't exist for this company
+            logger.error(f"Company-concept request failed: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Company-concept request failed: {e}")
             return None
 
-        try:
-            url = self.COMPANY_FACTS_URL.format(cik=cik)
-            data = self._get(url).json()
-            return data
-        except Exception as e:
-            logger.error(f"Failed to get company facts for {ticker}: {e}")
-            return None
+    @staticmethod
+    def _deduplicate_entries(
+        entries: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Deduplicate XBRL fact entries that share the same period end date.
+        A 10-K often restates prior-year figures for comparison, producing
+        duplicate 'end' dates.  We keep the most recently *filed* entry
+        for each unique (end, form) pair.
+        """
+        best: Dict[str, Dict[str, Any]] = {}
+        for e in entries:
+            key = (e.get("end", ""), e.get("form", ""))
+            existing = best.get(key)
+            if existing is None or e.get("filed", "") > existing.get("filed", ""):
+                best[key] = e
+        return list(best.values())
 
     def get_financial_metric(
         self,
@@ -155,6 +291,9 @@ class EdgarClient:
     ) -> List[Dict[str, Any]]:
         """
         Extract a specific financial metric from XBRL data.
+        Uses the lightweight company-concept endpoint with fallback chains
+        for concepts that have multiple XBRL tag variants.
+        Deduplicates restated figures so each period appears only once.
 
         Args:
             ticker: Stock ticker.
@@ -163,49 +302,274 @@ class EdgarClient:
             taxonomy: XBRL taxonomy (default "us-gaap").
             unit: Unit filter (e.g. "USD", "USD/shares").
             periods: Number of recent periods to return.
+
+        Returns:
+            List of dicts with keys: end, val, form, fy, fp, filed, concept_used.
         """
-        facts = self.get_company_facts(ticker)
-        if not facts:
+        cik = self.get_cik(ticker)
+        if not cik:
             return []
 
+        # Build the list of concept names to try
+        concepts_to_try = self.CONCEPT_ALIASES.get(concept, [concept])
+        if concept not in self.CONCEPT_ALIASES:
+            concepts_to_try = [concept]
+
+        for candidate in concepts_to_try:
+            try:
+                data = self._get_company_concept(cik, candidate, taxonomy)
+                if not data:
+                    continue
+
+                concept_data = data.get("units", {}).get(unit, [])
+                if not concept_data:
+                    continue
+
+                filtered = [
+                    {
+                        "end": entry.get("end"),
+                        "val": entry.get("val"),
+                        "form": entry.get("form"),
+                        "fy": entry.get("fy"),
+                        "fp": entry.get("fp"),
+                        "filed": entry.get("filed"),
+                    }
+                    for entry in concept_data
+                    if entry.get("form") in ("10-K", "10-Q")
+                ]
+
+                if not filtered:
+                    continue
+
+                # Deduplicate restated figures
+                filtered = self._deduplicate_entries(filtered)
+
+                filtered.sort(key=lambda x: x.get("end", ""), reverse=True)
+                result = filtered[:periods]
+
+                # Tag which concept actually matched
+                for entry in result:
+                    entry["concept_used"] = candidate
+
+                if candidate != concept:
+                    logger.info(
+                        f"{ticker}: '{concept}' not found, "
+                        f"used fallback '{candidate}'"
+                    )
+                return result
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to extract {candidate} for {ticker}: {e}"
+                )
+                continue
+
+        return []
+
+    # ── XBRL Frames (cross-company comparison) ─────────────────────────
+    def get_xbrl_frame(
+        self,
+        concept: str,
+        period: str,
+        taxonomy: str = "us-gaap",
+        unit: str = "USD",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fetch a single XBRL concept for ALL companies for a given period.
+        Returns one value per company — already deduplicated by the SEC.
+
+        Args:
+            concept: XBRL concept name (e.g. "Revenues", "Assets").
+            period:  Calendar period string.  Format rules:
+                     - Annual duration (income/CF):   "CY2023"
+                     - Quarterly duration (income/CF): "CY2023Q4"
+                     - Instantaneous (balance sheet):  "CY2023Q4I"
+            taxonomy: XBRL taxonomy (default "us-gaap").
+            unit: Unit of measure (e.g. "USD", "USD/shares", "shares").
+
+        Returns:
+            Dict with "data" list of {cik, entityName, val, end, ...} or None.
+        """
+        url = self.XBRL_FRAMES_URL.format(
+            taxonomy=taxonomy, concept=concept, unit=unit, period=period,
+        )
         try:
-            concept_data = (
-                facts.get("facts", {})
-                .get(taxonomy, {})
-                .get(concept, {})
-                .get("units", {})
-                .get(unit, [])
-            )
-
-            # Filter to annual (10-K) and quarterly (10-Q) filings
-            filtered = [
-                {
-                    "end": entry.get("end"),
-                    "val": entry.get("val"),
-                    "form": entry.get("form"),
-                    "fy": entry.get("fy"),
-                    "fp": entry.get("fp"),
-                    "filed": entry.get("filed"),
-                }
-                for entry in concept_data
-                if entry.get("form") in ("10-K", "10-Q")
-            ]
-
-            # Return most recent periods
-            filtered.sort(key=lambda x: x.get("end", ""), reverse=True)
-            return filtered[:periods]
-
+            return self._get(url).json()
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return None
+            logger.error(f"Frames request failed: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Failed to extract {concept} for {ticker}: {e}")
+            logger.error(f"Frames request failed: {e}")
+            return None
+
+    def compare_metric_across_companies(
+        self,
+        tickers: List[str],
+        concept: str,
+        year: int,
+        quarter: Optional[int] = None,
+        taxonomy: str = "us-gaap",
+        unit: str = "USD",
+    ) -> List[Dict[str, Any]]:
+        """
+        Compare a single financial metric across multiple companies using
+        the XBRL frames endpoint (one API call for all companies).
+
+        Args:
+            tickers: List of ticker symbols.
+            concept: XBRL concept name.
+            year: Calendar year (e.g. 2023).
+            quarter: Optional quarter (1-4). None = full year.
+            taxonomy: XBRL taxonomy.
+            unit: Unit of measure.
+
+        Returns:
+            List of dicts: {ticker, entity_name, val, concept_used, period}.
+        """
+        # Resolve tickers → CIKs
+        cik_map: Dict[str, str] = {}
+        for t in tickers:
+            cik = self.get_cik(t)
+            if cik:
+                cik_map[t.upper()] = cik
+
+        if not cik_map:
             return []
+
+        # Build CIK → ticker reverse map (strip leading zeros for matching)
+        cik_to_ticker = {int(cik): t for t, cik in cik_map.items()}
+
+        # Determine the period string based on concept type
+        concepts_to_try = self.CONCEPT_ALIASES.get(concept, [concept])
+        if concept not in self.CONCEPT_ALIASES:
+            concepts_to_try = [concept]
+
+        for candidate in concepts_to_try:
+            is_instant = candidate in self.INSTANTANEOUS_CONCEPTS
+
+            if is_instant:
+                # Balance sheet: instantaneous point-in-time
+                if quarter:
+                    period = f"CY{year}Q{quarter}I"
+                else:
+                    period = f"CY{year}Q4I"  # year-end snapshot
+            else:
+                # Income / cash flow: duration
+                if quarter:
+                    period = f"CY{year}Q{quarter}"
+                else:
+                    period = f"CY{year}"
+
+            frame_data = self.get_xbrl_frame(
+                candidate, period, taxonomy=taxonomy, unit=unit,
+            )
+            if not frame_data or not frame_data.get("data"):
+                continue
+
+            # Filter to only the requested tickers
+            results = []
+            for entry in frame_data["data"]:
+                entry_cik = entry.get("cik")
+                ticker = cik_to_ticker.get(entry_cik)
+                if ticker:
+                    results.append({
+                        "ticker": ticker,
+                        "entity_name": entry.get("entityName", ""),
+                        "val": entry.get("val"),
+                        "end": entry.get("end", ""),
+                        "concept_used": candidate,
+                        "period": period,
+                    })
+
+            if results:
+                if candidate != concept:
+                    logger.info(
+                        f"Frames: '{concept}' not found, "
+                        f"used fallback '{candidate}'"
+                    )
+                return results
+
+        return []
 
     # ── Filing text retrieval ──────────────────────────────────────────
+
+    # Sections of interest in 10-K / 10-Q filings.
+    # Regex patterns match common section headings in SEC filings.
+    _SECTION_PATTERNS = [
+        (r"item\s+1[\.\s]", "Item 1"),       # Business
+        (r"item\s+1a[\.\s]", "Item 1A"),      # Risk Factors
+        (r"item\s+7[\.\s]", "Item 7"),        # MD&A
+        (r"item\s+7a[\.\s]", "Item 7A"),      # Market Risk
+        (r"item\s+8[\.\s]", "Item 8"),        # Financial Statements
+    ]
+
+    def _clean_filing_html(self, html: str) -> str:
+        """
+        Extract readable text from an SEC filing HTML/iXBRL document.
+        Uses BeautifulSoup to properly handle inline XBRL tags and
+        produce clean, human-readable text.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Remove script, style, and hidden elements
+        for tag in soup.find_all(["script", "style", "meta", "link"]):
+            tag.decompose()
+
+        # Remove XBRL-specific tags but keep their text content
+        # (ix:nonNumeric, ix:nonFraction, ix:header, etc.)
+        for tag in soup.find_all(re.compile(r"^ix:", re.IGNORECASE)):
+            if tag.name and tag.name.lower() == "ix:header":
+                # The ix:header block is pure XBRL metadata — remove entirely
+                tag.decompose()
+            else:
+                # Replace the XBRL wrapper with its text content
+                tag.unwrap()
+
+        # Remove hidden div blocks (XBRL often hides metadata in these)
+        for tag in soup.find_all(
+            "div", style=re.compile(r"display\s*:\s*none", re.IGNORECASE)
+        ):
+            tag.decompose()
+
+        # Get text, collapsing whitespace
+        text = soup.get_text(separator=" ")
+        # Collapse runs of whitespace, but preserve paragraph breaks
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = text.strip()
+
+        return text
+
+    def _find_section_start(self, text: str) -> int:
+        """
+        Find where the actual business content starts by looking for
+        common SEC filing section headings (Item 1, Item 1A, etc.).
+        Returns the character offset, or 0 if no sections found.
+        """
+        text_lower = text.lower()
+        best_pos = len(text)  # start with "no match"
+
+        for pattern, _label in self._SECTION_PATTERNS:
+            match = re.search(pattern, text_lower)
+            if match and match.start() < best_pos:
+                best_pos = match.start()
+
+        return best_pos if best_pos < len(text) else 0
+
     def get_filing_text(
         self, ticker: str, form_type: str = "10-K", max_chars: int = 15000
     ) -> Optional[Dict[str, str]]:
         """
-        Fetch the most recent filing of a given type and return its text.
-        Truncated to max_chars to fit in context windows.
+        Fetch the most recent filing of a given type and return readable text.
+        Uses BeautifulSoup to strip iXBRL markup and skips the XBRL preamble
+        to start at actual business content.
+
+        Args:
+            ticker: Stock ticker symbol.
+            form_type: SEC form type (default "10-K").
+            max_chars: Max characters to return (default 15000).
         """
         filings = self.get_filings(ticker, form_types=[form_type], max_results=1)
         if not filings:
@@ -214,18 +578,27 @@ class EdgarClient:
         filing = filings[0]
         try:
             resp = self._get(filing["url"])
-            text = resp.text
+            raw_html = resp.text
 
-            # Strip HTML tags for readability
-            clean = re.sub(r"<[^>]+>", " ", text)
-            clean = re.sub(r"\s+", " ", clean).strip()
+            # Clean the HTML/iXBRL into readable text
+            clean = self._clean_filing_html(raw_html)
+
+            # For 10-K and 10-Q, try to skip to the first section heading
+            if form_type in ("10-K", "10-Q"):
+                section_start = self._find_section_start(clean)
+                if section_start > 0:
+                    clean = clean[section_start:]
+
+            # Truncate to requested size
+            truncated = len(clean) > max_chars
+            clean = clean[:max_chars]
 
             return {
                 "form": filing["form"],
                 "date": filing["date"],
                 "url": filing["url"],
-                "text": clean[:max_chars],
-                "truncated": len(clean) > max_chars,
+                "text": clean,
+                "truncated": truncated,
             }
         except Exception as e:
             logger.error(f"Failed to fetch filing text for {ticker}: {e}")

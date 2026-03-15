@@ -5,6 +5,7 @@ Data is delayed 15–20 min -- Support for Elite not available yet
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List
 
 import requests
@@ -25,18 +26,35 @@ class FinvizClient:
         return finviz.get_stock(ticker.upper().strip())
 
     @staticmethod
-    def get_multiple_stocks(tickers: List[str]) -> List[Dict[str, str]]:
-        """Get fundamentals for multiple stocks."""
-        results = []
-        for t in tickers:
-            try:
-                data = finviz.get_stock(t.upper().strip())
-                data["Ticker"] = t.upper().strip()
-                results.append(data)
-            except Exception as e:
-                logger.warning(f"Failed to fetch {t}: {e}")
-                results.append({"Ticker": t.upper(), "error": str(e)})
-        return results
+    def _fetch_single_stock(ticker: str) -> Dict[str, str]:
+        """Fetch a single stock's fundamentals (used by thread pool)."""
+        t = ticker.upper().strip()
+        try:
+            data = finviz.get_stock(t)
+            data["Ticker"] = t
+            return data
+        except Exception as e:
+            logger.warning(f"Failed to fetch {t}: {e}")
+            return {"Ticker": t, "error": str(e)}
+
+    @classmethod
+    def get_multiple_stocks(cls, tickers: List[str]) -> List[Dict[str, str]]:
+        """Get fundamentals for multiple stocks (fetched in parallel)."""
+        if not tickers:
+            return []
+        # Cap threads at 5 to avoid hammering Finviz
+        max_workers = min(len(tickers), 5)
+        ordered: Dict[str, Dict[str, str]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(cls._fetch_single_stock, t): t
+                for t in tickers
+            }
+            for future in as_completed(futures):
+                ticker = futures[future]
+                ordered[ticker.upper().strip()] = future.result()
+        # Preserve original ordering
+        return [ordered[t.upper().strip()] for t in tickers]
 
     # ── Screener ───────────────────────────────────────────────────────
     @staticmethod
