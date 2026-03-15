@@ -3,6 +3,7 @@ SEC Filing Tools
 """
 
 import logging
+from datetime import date
 from typing import List
 from mcp.types import TextContent
 
@@ -10,6 +11,21 @@ from ..clients.edgar_client import EdgarClient
 
 logger = logging.getLogger(__name__)
 edgar = EdgarClient()
+
+
+def _format_usd(val: float, unit: str) -> str:
+    """Format a numeric value with appropriate unit suffix."""
+    if unit == "USD" and abs(val) >= 1_000_000_000:
+        return f"${val / 1_000_000_000:,.2f}B"
+    if unit == "USD" and abs(val) >= 1_000_000:
+        return f"${val / 1_000_000:,.1f}M"
+    if unit == "USD":
+        return f"${val:,.0f}"
+    if unit == "USD/shares":
+        return f"${val:.2f}"
+    if unit == "shares" and abs(val) >= 1_000_000:
+        return f"{val / 1_000_000:,.1f}M"
+    return f"{val:,.0f}"
 
 
 def register_sec_tools(server):
@@ -162,28 +178,31 @@ def register_sec_tools(server):
                          f"files in US-GAAP format.",
                 )]
 
+            # Check if a fallback concept was used
+            concept_used = data[0].get("concept_used", metric)
+            fallback_note = ""
+            if concept_used != metric:
+                fallback_note = (
+                    f"\nNote: '{metric}' not found in XBRL data. "
+                    f"Using '{concept_used}' instead.\n"
+                )
+
             lines = [
                 f"Financial History: {ticker.upper()} — {metric}",
                 f"Source: SEC EDGAR XBRL (reported values)",
+            ]
+            if fallback_note:
+                lines.append(fallback_note)
+            lines.extend([
                 "=" * 55,
                 "",
                 f"{'Period End':<14}{'Form':<8}{'FY':<6}{'Value':>18}",
                 "-" * 55,
-            ]
+            ])
 
             for entry in data:
                 val = entry.get("val", 0)
-                # Format large numbers
-                if unit == "USD" and abs(val) >= 1_000_000:
-                    val_str = f"${val / 1_000_000:,.1f}M"
-                elif unit == "USD":
-                    val_str = f"${val:,.0f}"
-                elif unit == "USD/shares":
-                    val_str = f"${val:.2f}"
-                elif unit == "shares":
-                    val_str = f"{val / 1_000_000:,.1f}M"
-                else:
-                    val_str = f"{val:,.0f}"
+                val_str = _format_usd(val, unit)
 
                 lines.append(
                     f"{entry.get('end', '?'):<14}"
@@ -234,4 +253,132 @@ def register_sec_tools(server):
             return [TextContent(type="text", text="\n".join(lines))]
 
         except Exception as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    @server.tool()
+    def compare_financials(
+        tickers: str,
+        metric: str = "Revenues",
+        year: int = 0,
+        quarter: int = 0,
+    ) -> List[TextContent]:
+        """Compare a financial metric across multiple companies using
+        SEC XBRL data. Uses the XBRL frames endpoint — one API call
+        retrieves the metric for all companies, so this is very efficient.
+        Returns actual reported values from SEC filings.
+
+        Args:
+            tickers: Comma-separated ticker symbols, e.g. "AAPL,MSFT,GOOGL".
+            metric: XBRL concept name. Common metrics:
+                "Revenues" — Total revenue
+                "NetIncomeLoss" — Net income
+                "EarningsPerShareBasic" — Basic EPS
+                "EarningsPerShareDiluted" — Diluted EPS
+                "Assets" — Total assets
+                "Liabilities" — Total liabilities
+                "StockholdersEquity" — Shareholder equity
+                "OperatingIncomeLoss" — Operating income
+                "CashAndCashEquivalentsAtCarryingValue" — Cash on hand
+                "LongTermDebt" — Long-term debt
+                "CommonStockSharesOutstanding" — Shares outstanding
+            year: Calendar year to compare (e.g. 2024). Defaults to
+                  previous year if not specified.
+            quarter: Optional quarter (1-4). 0 = full year (default).
+        """
+        try:
+            ticker_list = [
+                t.strip().upper() for t in tickers.split(",") if t.strip()
+            ]
+            if not ticker_list:
+                return [TextContent(
+                    type="text", text="Please provide at least one ticker."
+                )]
+
+            # Default to previous calendar year (most likely to have data)
+            if year == 0:
+                year = date.today().year - 1
+
+            # Determine unit based on metric
+            if "PerShare" in metric:
+                unit = "USD/shares"
+            elif "Shares" in metric:
+                unit = "shares"
+            else:
+                unit = "USD"
+
+            qtr = quarter if quarter in (1, 2, 3, 4) else None
+
+            results = edgar.compare_metric_across_companies(
+                ticker_list,
+                concept=metric,
+                year=year,
+                quarter=qtr,
+                unit=unit,
+            )
+
+            if not results:
+                period_label = f"Q{quarter} " if qtr else ""
+                return [TextContent(
+                    type="text",
+                    text=f"No XBRL data found for {metric} "
+                         f"({period_label}{year}).\n"
+                         f"Data may not yet be available for this period, "
+                         f"or try a different year.",
+                )]
+
+            # Check for fallback
+            concept_used = results[0].get("concept_used", metric)
+            period_used = results[0].get("period", "")
+            fallback_note = ""
+            if concept_used != metric:
+                fallback_note = (
+                    f"\nNote: '{metric}' not found. "
+                    f"Using '{concept_used}' instead.\n"
+                )
+
+            period_label = f"Q{quarter} {year}" if qtr else str(year)
+            lines = [
+                f"Financial Comparison: {metric} — {period_label}",
+                f"Source: SEC EDGAR XBRL frames ({period_used})",
+            ]
+            if fallback_note:
+                lines.append(fallback_note)
+            lines.extend([
+                "=" * 60,
+                "",
+                f"{'Ticker':<10}{'Company':<30}{'Value':>18}",
+                "-" * 60,
+            ])
+
+            # Sort by value descending for easy comparison
+            results.sort(
+                key=lambda x: x.get("val") or 0, reverse=True,
+            )
+
+            for r in results:
+                val = r.get("val")
+                val_str = _format_usd(val, unit) if val is not None else "N/A"
+                name = r.get("entity_name", "")
+                # Truncate long names
+                if len(name) > 28:
+                    name = name[:25] + "..."
+                lines.append(
+                    f"{r['ticker']:<10}{name:<30}{val_str:>18}"
+                )
+
+            # Note any tickers that weren't found
+            found_tickers = {r["ticker"] for r in results}
+            missing = [t for t in ticker_list if t not in found_tickers]
+            if missing:
+                lines.extend([
+                    "",
+                    f"Not found in XBRL data: {', '.join(missing)}",
+                    "(Company may use a different fiscal year-end, "
+                    "IFRS taxonomy, or not yet filed.)",
+                ])
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        except Exception as e:
+            logger.error(f"compare_financials error: {e}")
             return [TextContent(type="text", text=f"Error: {e}")]

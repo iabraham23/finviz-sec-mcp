@@ -238,12 +238,30 @@ def register_screener_tools(server):
             if not results:
                 return [TextContent(type="text", text="No results from that URL.")]
 
-            lines = [f"URL Screen Results — {len(results)} stocks", "=" * 60, ""]
-            for stock in results[:40]:
+            results = results[:40]
+
+            lines = [
+                f"URL Screen Results — {len(results)} stocks",
+                f"Source: {url}",
+                "=" * 65,
+                "",
+            ]
+
+            for stock in results:
                 ticker = stock.get("Ticker", "?")
                 company = stock.get("Company", "?")
-                mcap = stock.get("Market Cap", "?")
-                lines.append(f"▸ {ticker} — {company} (Market Cap: {mcap})")
+                lines.append(f"▸ {ticker} — {company}")
+
+                # Show all available fields (same format as screen_stocks)
+                detail_parts = []
+                for key, val in stock.items():
+                    if key not in ("No.", "Ticker", "Company") and val:
+                        detail_parts.append(f"{key}: {val}")
+
+                for i in range(0, len(detail_parts), 4):
+                    chunk = detail_parts[i : i + 4]
+                    lines.append(f"  {' | '.join(chunk)}")
+                lines.append("")
 
             return [TextContent(type="text", text="\n".join(lines))]
         except Exception as e:
