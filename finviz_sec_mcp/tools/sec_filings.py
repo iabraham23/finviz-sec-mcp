@@ -1,7 +1,7 @@
 """
 SEC EDGAR Tools — historical financial data and filing access.
 
-Data source: SEC EDGAR public API (free, no key required).
+Data source: SEC EDGAR public API via edgartools library (free, no key required).
 All financial values are actual reported figures from XBRL-tagged filings.
 
 Tool selection guide
@@ -12,9 +12,11 @@ get_financial_ttm      — Trailing twelve months for one or more companies.
                          Best for up-to-date income statement / cash flow values.
 compare_financials     — Same metric across MULTIPLE companies for a given year.
                          Handles non-December fiscal year ends automatically.
+get_financial_snapshot  — Full income statement, balance sheet, and cash flow
+                         from the latest filing. Best starting point for analysis.
 get_filing_text        — Full text of a specific filing (10-K MD&A, risk factors, etc.)
 get_sec_filings        — List of recent filings with EDGAR links.
-get_insider_filings    — Form 3/4/5 insider transaction filings.
+get_insider_filings    — Form 3/4/5 insider transaction filings with structured data.
 
 For current-snapshot fundamentals (ratios, price, etc.) use the Finviz tools:
 get_stock_fundamentals, compare_stocks, get_analyst_ratings, get_insider_activity.
@@ -33,6 +35,8 @@ edgar = EdgarClient()
 
 def _format_usd(val: float, unit: str) -> str:
     """Format a numeric value with appropriate unit suffix."""
+    if val is None:
+        return "N/A"
     if unit == "USD" and abs(val) >= 1_000_000_000:
         return f"${val / 1_000_000_000:,.2f}B"
     if unit == "USD" and abs(val) >= 1_000_000:
@@ -57,7 +61,7 @@ def register_sec_tools(server):
     ) -> List[TextContent]:
         """List recent SEC filings for a company with EDGAR links.
         Use this to find filing dates and document URLs before calling
-        get_filing_text. Data source: SEC EDGAR submissions API.
+        get_filing_text. Data source: SEC EDGAR via edgartools.
 
         Args:
             ticker: Stock ticker symbol.
@@ -113,10 +117,11 @@ def register_sec_tools(server):
         max_chars: int = 15000,
     ) -> List[TextContent]:
         """Fetch and return the text content of the most recent SEC filing.
-        Strips iXBRL markup and skips directly to the first section heading
-        (Item 1, Item 1A, Item 7, etc.) for clean readable text.
+        Uses edgartools' built-in text extraction for clean, readable output
+        with iXBRL markup properly stripped.
         Useful for reading risk factors, MD&A, and business descriptions.
-        For structured financial data use get_financial_history instead.
+        For structured financial data use get_financial_history or
+        get_financial_snapshot instead.
 
         Args:
             ticker: Stock ticker symbol.
@@ -279,8 +284,10 @@ def register_sec_tools(server):
     def get_insider_filings(
         ticker: str, max_results: int = 15
     ) -> List[TextContent]:
-        """Get insider trading SEC filings (Form 3, 4, 5) with EDGAR links.
-        Returns filing dates, descriptions, and direct document URLs.
+        """Get insider trading SEC filings (Form 3, 4, 5) with structured data.
+        Returns filing dates, insider names, positions, trade details,
+        and direct EDGAR links. Powered by edgartools' Form4 parser.
+
         For a human-readable summary of recent buys/sells with dollar values,
         use get_insider_activity (Finviz) instead.
 
@@ -289,8 +296,8 @@ def register_sec_tools(server):
             max_results: Number of filings to return.
         """
         try:
-            filings = edgar.get_filings(
-                ticker, form_types=["3", "4", "5"], max_results=max_results
+            filings = edgar.get_insider_filings_detailed(
+                ticker, max_results=max_results
             )
 
             if not filings:
@@ -305,9 +312,26 @@ def register_sec_tools(server):
                 "",
             ]
             for f in filings:
-                lines.append(f"▸ Form {f['form']} — {f['date']}")
-                if f.get("description"):
-                    lines.append(f"  {f['description']}")
+                header = f"▸ Form {f['form']} — {f['date']}"
+                if f.get("insider_name"):
+                    header += f" | {f['insider_name']}"
+                if f.get("position"):
+                    header += f" ({f['position']})"
+                lines.append(header)
+
+                details = []
+                if f.get("activity"):
+                    details.append(f"Activity: {f['activity']}")
+                if f.get("net_change") is not None and f["net_change"] != 0:
+                    details.append(f"Net shares: {f['net_change']:+,.0f}")
+                if f.get("net_value") is not None and f["net_value"] != 0:
+                    details.append(f"Net value: ${f['net_value']:,.0f}")
+                if f.get("remaining_shares") is not None:
+                    details.append(f"Remaining: {f['remaining_shares']:,.0f}")
+
+                if details:
+                    lines.append(f"  {' | '.join(details)}")
+
                 lines.append(f"  {f['url']}")
                 lines.append("")
 
@@ -324,12 +348,10 @@ def register_sec_tools(server):
         quarter: int = 0,
     ) -> List[TextContent]:
         """Compare a financial metric across multiple companies using
-        SEC XBRL data. Uses the XBRL frames endpoint — one API call
-        retrieves the metric for all companies, so this is very efficient.
-        Returns actual reported values from SEC filings.
+        SEC XBRL data. Returns actual reported values from SEC filings.
 
         Companies with non-December fiscal year ends are automatically
-        handled via a per-company fallback — no ticker is silently dropped.
+        handled — no ticker is silently dropped.
 
         Args:
             tickers: Comma-separated ticker symbols, e.g. "AAPL,MSFT,GOOGL".
@@ -393,7 +415,7 @@ def register_sec_tools(server):
                          f"or try a different year.",
                 )]
 
-            # Check for concept fallback (use first calendar-period result for label)
+            # Check for concept fallback
             cal_results = [r for r in results if not r.get("fiscal_year_note")]
             concept_used = (cal_results or results)[0].get("concept_used", metric)
             fallback_note = ""
@@ -430,7 +452,6 @@ def register_sec_tools(server):
                 if len(name) > 28:
                     name = name[:25] + "..."
                 end_date = r.get("end", "")
-                # Flag non-standard fiscal year entries
                 fy_marker = " *" if r.get("fiscal_year_note") else ""
                 lines.append(
                     f"{r['ticker']:<10}{name:<30}{val_str:>18}  {end_date}{fy_marker}"
@@ -445,7 +466,7 @@ def register_sec_tools(server):
                     f"value shown is from the fiscal year ending closest to {year}.",
                 ])
 
-            # Note any tickers completely absent from XBRL data
+            # Note any tickers completely absent
             found_tickers = {r["ticker"] for r in results}
             missing = [t for t in ticker_list if t not in found_tickers]
             if missing:
@@ -548,4 +569,100 @@ def register_sec_tools(server):
 
         except Exception as e:
             logger.error(f"get_financial_ttm error: {e}")
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    @server.tool()
+    def get_financial_snapshot(
+        ticker: str,
+    ) -> List[TextContent]:
+        """Get a complete financial snapshot from the latest SEC filing:
+        income statement, balance sheet, and cash flow statement with
+        multi-period comparison. Also includes quick-access metrics
+        (revenue, net income, FCF, etc.).
+
+        This is the best starting point for company financial analysis.
+        Returns actual XBRL-tagged data from SEC filings — not estimates.
+        Powered by edgartools' Financials API.
+
+        Args:
+            ticker: Stock ticker symbol.
+        """
+        try:
+            data = edgar.get_financial_statements(ticker)
+
+            if not data:
+                return [TextContent(
+                    type="text",
+                    text=f"Could not retrieve financial statements for {ticker.upper()}. "
+                         f"The company may not file in US-GAAP/XBRL format.",
+                )]
+
+            lines = [
+                f"Financial Snapshot: {ticker.upper()}",
+                f"Source: SEC EDGAR XBRL (latest filing)",
+                "=" * 70,
+            ]
+
+            # Quick metrics summary
+            qm = data.get("quick_metrics")
+            if qm:
+                lines.extend(["", "── Key Metrics ──"])
+                metric_pairs = [
+                    ("Revenue", qm.get("revenue")),
+                    ("Net Income", qm.get("net_income")),
+                    ("Operating Income", qm.get("operating_income")),
+                    ("Total Assets", qm.get("total_assets")),
+                    ("Total Liabilities", qm.get("total_liabilities")),
+                    ("Stockholders' Equity", qm.get("stockholders_equity")),
+                    ("Operating Cash Flow", qm.get("operating_cash_flow")),
+                    ("Free Cash Flow", qm.get("free_cash_flow")),
+                    ("Capital Expenditures", qm.get("capital_expenditures")),
+                ]
+                for label, val in metric_pairs:
+                    if val is not None:
+                        lines.append(f"  {label:<25} {_format_usd(val, 'USD'):>18}")
+
+            # Detailed statements
+            for stmt_key, stmt_title in [
+                ("income_statement", "INCOME STATEMENT"),
+                ("balance_sheet", "BALANCE SHEET"),
+                ("cashflow_statement", "CASH FLOW STATEMENT"),
+            ]:
+                stmt = data.get(stmt_key)
+                if not stmt:
+                    continue
+
+                periods = stmt.get("periods", [])
+                rows = stmt.get("rows", [])
+
+                if not periods or not rows:
+                    continue
+
+                lines.extend(["", f"── {stmt_title} ──"])
+
+                # Header row
+                header = f"{'Line Item':<45}"
+                for p in periods[:3]:  # max 3 periods for readability
+                    header += f"{p:>18}"
+                lines.append(header)
+                lines.append("-" * (45 + 18 * min(len(periods), 3)))
+
+                for row in rows:
+                    label = row.get("label", "")
+                    if len(label) > 43:
+                        label = label[:40] + "..."
+
+                    line = f"{label:<45}"
+                    for p in periods[:3]:
+                        val = row.get(p)
+                        if val is not None:
+                            line += f"{_format_usd(float(val), 'USD'):>18}"
+                        else:
+                            line += f"{'—':>18}"
+                    lines.append(line)
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        except Exception as e:
+            logger.error(f"get_financial_snapshot error: {e}")
             return [TextContent(type="text", text=f"Error: {e}")]

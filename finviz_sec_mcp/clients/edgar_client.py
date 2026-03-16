@@ -1,215 +1,156 @@
 """
-SEC EDGAR API Client
-Free public API — no key required. Standard Rate limit: 10 requests/second.
-Docs: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
+SEC EDGAR Client — powered by edgartools.
+
+Wraps the edgartools library (https://github.com/dgunning/edgartools) to
+provide a clean, reliable interface for SEC filing data.  Replaces the
+previous hand-rolled REST client with edgartools' typed objects, built-in
+XBRL parsing, and automatic rate limiting.
+
+Free public API — no key required.
 """
 
 import logging
 import os
 import re
-import threading
-import time
-import requests
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
+from datetime import date
 from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
+from edgar import Company, set_identity
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Must include contact email per SEC policy
+# SEC requires a contact email in User-Agent
 _sec_email = os.getenv("SEC_EMAIL", "ia@cwcgroup.com")
-USER_AGENT = f"FinvizSecMCP {_sec_email}"
+set_identity(_sec_email)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+# Balance-sheet concepts are point-in-time; everything else is duration.
+INSTANTANEOUS_CONCEPTS = {
+    "Assets", "Liabilities", "StockholdersEquity",
+    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    "CashAndCashEquivalentsAtCarryingValue",
+    "CashCashEquivalentsAndShortTermInvestments", "Cash",
+    "LongTermDebt", "LongTermDebtNoncurrent",
+    "LongTermDebtAndCapitalLeaseObligations",
+    "CommonStockSharesOutstanding",
+}
+
+# Maps user-friendly metric names to edgartools FactQuery concept patterns.
+# edgartools' by_concept() supports regex, so we use a broad pattern for each
+# metric and then pick the best match from results.
+CONCEPT_ALIASES: Dict[str, List[str]] = {
+    "Revenues": [
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
+        "SalesRevenueNet",
+        "SalesRevenueGoodsNet",
+        "SalesRevenueServicesNet",
+    ],
+    "NetIncomeLoss": [
+        "NetIncomeLoss",
+        "NetIncomeLossAvailableToCommonStockholdersBasic",
+        "ProfitLoss",
+    ],
+    "OperatingIncomeLoss": [
+        "OperatingIncomeLoss",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    ],
+    "GrossProfit": ["GrossProfit"],
+    "SellingGeneralAndAdministrativeExpense": [
+        "SellingGeneralAndAdministrativeExpense",
+        "GeneralAndAdministrativeExpense",
+        "SellingAndMarketingExpense",
+        "SellingExpense",
+    ],
+    "ResearchAndDevelopmentExpense": [
+        "ResearchAndDevelopmentExpense",
+        "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
+    ],
+    "InterestExpense": [
+        "InterestExpense",
+        "InterestExpenseDebt",
+        "InterestAndDebtExpense",
+        "InterestCostsIncurred",
+    ],
+    "IncomeTaxExpenseBenefit": [
+        "IncomeTaxExpenseBenefit",
+        "IncomeTaxesPaidNet",
+    ],
+    "EarningsPerShareBasic": ["EarningsPerShareBasic"],
+    "EarningsPerShareDiluted": ["EarningsPerShareDiluted"],
+    "LongTermDebt": [
+        "LongTermDebt",
+        "LongTermDebtNoncurrent",
+        "LongTermDebtAndCapitalLeaseObligations",
+    ],
+    "CashAndCashEquivalentsAtCarryingValue": [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsAndShortTermInvestments",
+        "Cash",
+    ],
+    "StockholdersEquity": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    ],
+    "NetCashProvidedByUsedInOperatingActivities": [
+        "NetCashProvidedByOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivities",
+    ],
+    "NetCashProvidedByUsedInFinancingActivities": [
+        "NetCashProvidedByUsedInFinancingActivities",
+        "NetCashProvidedByFinancingActivities",
+    ],
+    "NetCashProvidedByUsedInInvestingActivities": [
+        "NetCashProvidedByUsedInInvestingActivities",
+        "NetCashProvidedByInvestingActivities",
+    ],
+    "PaymentsOfDividends": [
+        "PaymentsOfDividends",
+        "PaymentsOfDividendsCommonStock",
+        "DividendsCommonStockCash",
+        "PaymentsOfOrdinaryDividends",
+    ],
+    "DepreciationDepletionAndAmortization": [
+        "DepreciationDepletionAndAmortization",
+        "DepreciationAndAmortization",
+        "Depreciation",
+    ],
+    "CapitalExpenditure": [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
+        "CapitalExpenditureDiscontinuedOperations",
+    ],
+}
 
 
 class EdgarClient:
-    """Client for SEC EDGAR public APIs."""
-
-    COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
-    SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
-    COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-    COMPANY_CONCEPT_URL = (
-        "https://data.sec.gov/api/xbrl/companyconcept"
-        "/CIK{cik}/{taxonomy}/{concept}.json"
-    )
-    XBRL_FRAMES_URL = (
-        "https://data.sec.gov/api/xbrl/frames"
-        "/{taxonomy}/{concept}/{unit}/{period}.json"
-    )
-    ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data"
-
-    # Balance sheet concepts are instantaneous (point-in-time) values.
-    # Income/cash-flow concepts are duration-based.
-    # This matters for the frames endpoint period format.
-    INSTANTANEOUS_CONCEPTS = {
-        "Assets", "Liabilities", "StockholdersEquity",
-        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
-        "CashAndCashEquivalentsAtCarryingValue",
-        "CashCashEquivalentsAndShortTermInvestments", "Cash",
-        "LongTermDebt", "LongTermDebtNoncurrent",
-        "LongTermDebtAndCapitalLeaseObligations",
-        "CommonStockSharesOutstanding",
-    }
-
-    # ── XBRL concept fallback chains ─────────────────────────────────
-    # After ASC 606 (2018+), many companies switched revenue tags.
-    # When the primary concept doesn't match, try alternatives in order.
-    CONCEPT_ALIASES: Dict[str, List[str]] = {
-        "Revenues": [
-            "Revenues",
-            "RevenueFromContractWithCustomerExcludingAssessedTax",
-            "RevenueFromContractWithCustomerIncludingAssessedTax",
-            "SalesRevenueNet",
-            "SalesRevenueGoodsNet",
-            "SalesRevenueServicesNet",
-        ],
-        "NetIncomeLoss": [
-            "NetIncomeLoss",
-            "NetIncomeLossAvailableToCommonStockholdersBasic",
-            "ProfitLoss",
-        ],
-        "OperatingIncomeLoss": [
-            "OperatingIncomeLoss",
-            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
-        ],
-        "GrossProfit": [
-            "GrossProfit",
-        ],
-        "SellingGeneralAndAdministrativeExpense": [
-            "SellingGeneralAndAdministrativeExpense",
-            "GeneralAndAdministrativeExpense",
-            "SellingAndMarketingExpense",
-            "SellingExpense",
-        ],
-        "ResearchAndDevelopmentExpense": [
-            "ResearchAndDevelopmentExpense",
-            "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
-        ],
-        "InterestExpense": [
-            "InterestExpense",
-            "InterestExpenseDebt",
-            "InterestAndDebtExpense",
-            "InterestCostsIncurred",
-        ],
-        "IncomeTaxExpenseBenefit": [
-            "IncomeTaxExpenseBenefit",
-            "IncomeTaxesPaidNet",
-        ],
-        "EarningsPerShareBasic": [
-            "EarningsPerShareBasic",
-        ],
-        "EarningsPerShareDiluted": [
-            "EarningsPerShareDiluted",
-        ],
-        "LongTermDebt": [
-            "LongTermDebt",
-            "LongTermDebtNoncurrent",
-            "LongTermDebtAndCapitalLeaseObligations",
-        ],
-        "CashAndCashEquivalentsAtCarryingValue": [
-            "CashAndCashEquivalentsAtCarryingValue",
-            "CashCashEquivalentsAndShortTermInvestments",
-            "Cash",
-        ],
-        "StockholdersEquity": [
-            "StockholdersEquity",
-            "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
-        ],
-        # Cash flow concepts (duration-based, like income)
-        "NetCashProvidedByUsedInOperatingActivities": [
-            "NetCashProvidedByOperatingActivities",
-            "NetCashProvidedByUsedInOperatingActivities",
-        ],
-        "NetCashProvidedByUsedInFinancingActivities": [
-            "NetCashProvidedByUsedInFinancingActivities",
-            "NetCashProvidedByFinancingActivities",
-        ],
-        "NetCashProvidedByUsedInInvestingActivities": [
-            "NetCashProvidedByUsedInInvestingActivities",
-            "NetCashProvidedByInvestingActivities",
-        ],
-        "PaymentsOfDividends": [
-            "PaymentsOfDividends",
-            "PaymentsOfDividendsCommonStock",
-            "DividendsCommonStockCash",
-            "PaymentsOfOrdinaryDividends",
-        ],
-        "DepreciationDepletionAndAmortization": [
-            "DepreciationDepletionAndAmortization",
-            "DepreciationAndAmortization",
-            "Depreciation",
-        ],
-        "CapitalExpenditure": [
-            "PaymentsToAcquirePropertyPlantAndEquipment",
-            "PaymentsToAcquireProductiveAssets",
-            "CapitalExpenditureDiscontinuedOperations",
-        ],
-    }
+    """Client for SEC EDGAR data via the edgartools library."""
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": USER_AGENT})
-        self._cik_cache: Dict[str, str] = {}
-        self._cik_cache_populated = False
-        self._last_request_time = 0.0
-        self._throttle_lock = threading.Lock()
+        # Company objects are cached by ticker to avoid repeated lookups
+        self._company_cache: Dict[str, Company] = {}
 
-    # ── Rate limiting ──────────────────────────────────────────────────
-    def _throttle(self):
-        """Enforce 10 req/sec rate limit (thread-safe)."""
-        with self._throttle_lock:
-            elapsed = time.time() - self._last_request_time
-            if elapsed < 0.1:
-                time.sleep(0.1 - elapsed)
-            self._last_request_time = time.time()
-
-    def _get(self, url: str, params: Optional[Dict] = None) -> requests.Response:
-        self._throttle()
-        resp = self.session.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        return resp
-
-    # ── Ticker → CIK resolution ───────────────────────────────────────
-    def _populate_cik_cache(self) -> None:
-        """Download the full SEC ticker→CIK map and cache all ~10K entries.
-        Only called once (or after a cache-miss retry)."""
-        try:
-            data = self._get(self.COMPANY_TICKERS_URL).json()
-            for entry in data.values():
-                t = entry.get("ticker", "").upper()
-                cik = str(entry.get("cik_str", "")).zfill(10)
-                self._cik_cache[t] = cik
-            self._cik_cache_populated = True
-        except Exception as e:
-            logger.error(f"CIK cache population failed: {e}")
-
-    def get_cik(self, ticker: str) -> Optional[str]:
-        """Resolve a ticker symbol to a zero-padded 10-digit CIK."""
+    def _get_company(self, ticker: str) -> Optional[Company]:
+        """Get or create a cached Company object for a ticker."""
         ticker = ticker.upper().strip()
+        if ticker in self._company_cache:
+            return self._company_cache[ticker]
+        try:
+            company = Company(ticker)
+            self._company_cache[ticker] = company
+            return company
+        except Exception as e:
+            logger.error(f"Failed to look up company {ticker}: {e}")
+            return None
 
-        # Fast path: already cached
-        if ticker in self._cik_cache:
-            return self._cik_cache[ticker]
+    # ── Filing list ──────────────────────────────────────────────────────
 
-        # First call: populate the entire cache from SEC
-        if not self._cik_cache_populated:
-            self._populate_cik_cache()
-            if ticker in self._cik_cache:
-                return self._cik_cache[ticker]
-
-        # Still not found — try one fresh download in case it's newly listed
-        if self._cik_cache_populated:
-            logger.info(f"CIK miss for {ticker}, retrying with fresh download")
-            self._cik_cache_populated = False
-            self._populate_cik_cache()
-            if ticker in self._cik_cache:
-                return self._cik_cache[ticker]
-
-        logger.warning(f"Ticker {ticker} not found in SEC company tickers")
-        return None
-
-    # ── Company submissions (filing list) ──────────────────────────────
     def get_filings(
         self,
         ticker: str,
@@ -221,94 +162,120 @@ class EdgarClient:
 
         Args:
             ticker: Stock ticker symbol.
-            form_types: Filter to specific forms (e.g. ["10-K", "10-Q", "8-K"]).
+            form_types: Filter to specific forms (e.g. ["10-K", "10-Q"]).
             max_results: Maximum filings to return.
         """
-        cik = self.get_cik(ticker)
-        if not cik:
+        company = self._get_company(ticker)
+        if not company:
             return []
 
         try:
-            url = self.SUBMISSIONS_URL.format(cik=cik)
-            data = self._get(url).json()
-            recent = data.get("filings", {}).get("recent", {})
+            # Get filings, optionally filtered by form type
+            if form_types and len(form_types) == 1:
+                filings = company.get_filings(form=form_types[0])
+            elif form_types:
+                # edgartools supports a single form filter;
+                # for multiple, get all and filter in-memory
+                filings = company.get_filings()
+            else:
+                filings = company.get_filings()
 
-            forms = recent.get("form", [])
-            dates = recent.get("filingDate", [])
-            accessions = recent.get("accessionNumber", [])
-            primary_docs = recent.get("primaryDocument", [])
-            descriptions = recent.get("primaryDocDescription", [])
+            results = []
+            for f in filings:
+                # Apply multi-form filter if needed
+                if form_types and len(form_types) > 1:
+                    if f.form not in form_types:
+                        continue
 
-            filings = []
-            for i in range(len(forms)):
-                if form_types and forms[i] not in form_types:
-                    continue
-
-                accession_clean = accessions[i].replace("-", "")
-                filing_url = (
-                    f"{self.ARCHIVES_URL}/{int(cik)}/{accession_clean}/{primary_docs[i]}"
-                )
-
-                filings.append({
-                    "form": forms[i],
-                    "date": dates[i],
-                    "accession": accessions[i],
-                    "description": descriptions[i] if i < len(descriptions) else "",
-                    "url": filing_url,
+                results.append({
+                    "form": f.form,
+                    "date": str(f.filing_date),
+                    "accession": f.accession_no,
+                    "description": getattr(f, "primary_doc_description", "") or "",
+                    "url": f.homepage_url or "",
                 })
 
-                if len(filings) >= max_results:
+                if len(results) >= max_results:
                     break
 
-            return filings
+            return results
 
         except Exception as e:
             logger.error(f"Failed to get filings for {ticker}: {e}")
             return []
 
-    # ── Single-concept lookup (lightweight) ─────────────────────────
-    def _get_company_concept(
-        self,
-        cik: str,
-        concept: str,
-        taxonomy: str = "us-gaap",
-    ) -> Optional[Dict[str, Any]]:
+    # ── Filing text retrieval ────────────────────────────────────────────
+
+    def get_filing_text(
+        self, ticker: str, form_type: str = "10-K", max_chars: int = 15000
+    ) -> Optional[Dict[str, str]]:
         """
-        Fetch a single XBRL concept for a company via the company-concept
-        endpoint.  Much lighter than downloading the full companyfacts blob.
-        Returns the raw JSON or None on 404 / error.
+        Fetch the most recent filing of a given type and return clean text.
+        Uses edgartools' built-in text extraction which properly handles
+        iXBRL markup without manual BeautifulSoup parsing.
+
+        Args:
+            ticker: Stock ticker symbol.
+            form_type: SEC form type (default "10-K").
+            max_chars: Max characters to return (default 15000).
         """
-        url = self.COMPANY_CONCEPT_URL.format(
-            cik=cik, taxonomy=taxonomy, concept=concept,
-        )
-        try:
-            return self._get(url).json()
-        except requests.HTTPError as e:
-            if e.response is not None and e.response.status_code == 404:
-                return None  # concept doesn't exist for this company
-            logger.error(f"Company-concept request failed: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Company-concept request failed: {e}")
+        company = self._get_company(ticker)
+        if not company:
             return None
 
-    @staticmethod
-    def _deduplicate_entries(
-        entries: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        Deduplicate XBRL fact entries that share the same period end date.
-        A 10-K often restates prior-year figures for comparison, producing
-        duplicate 'end' dates.  We keep the most recently *filed* entry
-        for each unique (end, form) pair.
-        """
-        best: Dict[str, Dict[str, Any]] = {}
-        for e in entries:
-            key = (e.get("end", ""), e.get("form", ""))
-            existing = best.get(key)
-            if existing is None or e.get("filed", "") > existing.get("filed", ""):
-                best[key] = e
-        return list(best.values())
+        try:
+            filing = company.latest(form_type)
+            if not filing:
+                return None
+
+            # edgartools .text() returns clean plaintext with XBRL stripped
+            text = filing.text()
+            if not text:
+                return None
+
+            # For 10-K/10-Q, skip to the first section heading
+            if form_type in ("10-K", "10-Q"):
+                section_start = self._find_section_start(text)
+                if section_start > 0:
+                    text = text[section_start:]
+
+            truncated = len(text) > max_chars
+            text = text[:max_chars]
+
+            return {
+                "form": filing.form,
+                "date": str(filing.filing_date),
+                "url": filing.homepage_url or "",
+                "text": text,
+                "truncated": truncated,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to fetch filing text for {ticker}: {e}")
+            return None
+
+    # Section patterns for finding where content starts in 10-K/10-Q
+    _SECTION_PATTERNS = [
+        (r"item\s+1[\.\s]", "Item 1"),
+        (r"item\s+1a[\.\s]", "Item 1A"),
+        (r"item\s+7[\.\s]", "Item 7"),
+        (r"item\s+7a[\.\s]", "Item 7A"),
+        (r"item\s+8[\.\s]", "Item 8"),
+    ]
+
+    def _find_section_start(self, text: str) -> int:
+        """Find where the actual business content starts."""
+        text_lower = text.lower()
+        best_pos = len(text)
+
+        for pattern, _label in self._SECTION_PATTERNS:
+            match = re.search(pattern, text_lower)
+            if match and match.start() < best_pos:
+                best_pos = match.start()
+
+        return best_pos if best_pos < len(text) else 0
+
+    # ── Financial metrics via FactQuery ──────────────────────────────────
 
     def get_financial_metric(
         self,
@@ -320,98 +287,165 @@ class EdgarClient:
         form_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Extract a specific financial metric from XBRL data.
-        Uses the lightweight company-concept endpoint with fallback chains
-        for concepts that have multiple XBRL tag variants.
-        Deduplicates restated figures so each period appears only once.
+        Extract a specific financial metric from XBRL data using edgartools'
+        FactQuery API with concept alias fallback chains.
+
+        Tries all concept aliases and picks the one with the most recent data,
+        ensuring ASC 606 revenue tags are preferred over deprecated ones.
 
         Args:
             ticker: Stock ticker.
-            concept: XBRL concept name (e.g. "Revenues", "NetIncomeLoss",
-                     "EarningsPerShareBasic", "Assets", "StockholdersEquity").
+            concept: Metric name (e.g. "Revenues", "NetIncomeLoss").
             taxonomy: XBRL taxonomy (default "us-gaap").
             unit: Unit filter (e.g. "USD", "USD/shares").
             periods: Number of recent periods to return.
-            form_types: Restrict to specific form types, e.g. ["10-K"] for
-                        annual-only or ["10-Q"] for quarterly-only.
-                        Defaults to both 10-K and 10-Q.
+            form_types: Restrict to specific form types, e.g. ["10-K"].
 
         Returns:
             List of dicts with keys: end, val, form, fy, fp, filed, concept_used.
         """
-        cik = self.get_cik(ticker)
-        if not cik:
+        company = self._get_company(ticker)
+        if not company:
             return []
 
+        # Build allowed forms and fiscal-period filters
         allowed_forms = set(form_types) if form_types else {"10-K", "10-Q"}
 
-        # Derive fiscal-period filter from form_types.
-        # 10-K filings contain BOTH the annual total (fp="FY") AND quarterly
-        # sub-periods (fp="Q1"/"Q2"/"Q3") for comparison.  Without fp filtering,
-        # "annual" requests return quarterly figures mixed into the series.
         if form_types and set(form_types) == {"10-K"}:
-            allowed_fp: Optional[set] = {"FY"}
+            allowed_fp = {"FY"}
         elif form_types and set(form_types) == {"10-Q"}:
             allowed_fp = {"Q1", "Q2", "Q3", "Q4"}
         else:
-            allowed_fp = None  # no fp restriction when mixing form types
+            allowed_fp = None
 
-        # Build the list of concept names to try
-        concepts_to_try = self.CONCEPT_ALIASES.get(concept, [concept])
-        if concept not in self.CONCEPT_ALIASES:
-            concepts_to_try = [concept]
+        # Build concept fallback chain
+        concepts_to_try = CONCEPT_ALIASES.get(concept, [concept])
+
+        try:
+            facts = company.get_facts()
+        except Exception as e:
+            logger.error(f"Failed to get facts for {ticker}: {e}")
+            return []
+
+        # Try ALL concept aliases and pick the one with the most recent data.
+        # This is critical because e.g. "Revenues" only has data through 2018
+        # while "RevenueFromContractWithCustomerExcludingAssessedTax" has
+        # current data after ASC 606 adoption.
+        best_candidate = None
+        best_df = None
+        best_max_date = None
 
         for candidate in concepts_to_try:
             try:
-                data = self._get_company_concept(cik, candidate, taxonomy)
-                if not data:
+                # Build query with form type filter applied via edgartools API
+                query = facts.query().by_concept(candidate)
+
+                # Apply form type filter via edgartools if single form
+                if form_types and len(form_types) == 1:
+                    query = query.by_form_type(form_types[0])
+
+                df = query.to_dataframe()
+                if df is None or df.empty:
                     continue
 
-                concept_data = data.get("units", {}).get(unit, [])
-                if not concept_data:
-                    continue
+                # Filter to matching form types (for multi-form or unfiltered)
+                if "form_type" in df.columns and (not form_types or len(form_types) > 1):
+                    df = df[df["form_type"].isin(allowed_forms)]
 
-                filtered = [
-                    {
-                        "end": entry.get("end"),
-                        "val": entry.get("val"),
-                        "form": entry.get("form"),
-                        "fy": entry.get("fy"),
-                        "fp": entry.get("fp"),
-                        "filed": entry.get("filed"),
+                # Filter to matching fiscal periods
+                if allowed_fp and "fiscal_period" in df.columns:
+                    df = df[df["fiscal_period"].isin(allowed_fp)]
+
+                # Filter to matching unit — edgartools uses different
+                # unit strings than the raw SEC API (e.g. "USD per share"
+                # instead of "USD/shares")
+                if "unit" in df.columns:
+                    unit_map = {
+                        "USD/shares": ["USD/shares", "USD per share"],
+                        "shares": ["shares"],
+                        "USD": ["USD"],
                     }
-                    for entry in concept_data
-                    if entry.get("form") in allowed_forms
-                    and (allowed_fp is None or entry.get("fp") in allowed_fp)
-                ]
+                    acceptable_units = unit_map.get(unit, [unit])
+                    df = df[df["unit"].isin(acceptable_units)]
 
-                if not filtered:
+                # For quarterly data (10-Q), filter out year-to-date
+                # cumulative figures.  10-Q filings contain BOTH single-
+                # quarter values (≤100 day duration) AND cumulative YTD
+                # values (6-9 month spans).  We only want single quarters.
+                if (allowed_fp and allowed_fp != {"FY"}
+                        and "period_start" in df.columns
+                        and "period_end" in df.columns):
+                    try:
+                        import pandas as pd
+                        ps = pd.to_datetime(df["period_start"])
+                        pe = pd.to_datetime(df["period_end"])
+                        duration_days = (pe - ps).dt.days
+                        # Single quarter ≈ 90 days; allow up to 100
+                        df = df[duration_days <= 100]
+                    except Exception:
+                        pass  # fall through if date parsing fails
+
+                if df.empty:
                     continue
 
-                # Deduplicate restated figures
-                filtered = self._deduplicate_entries(filtered)
-
-                filtered.sort(key=lambda x: x.get("end", ""), reverse=True)
-                result = filtered[:periods]
-
-                # Tag which concept actually matched
-                for entry in result:
-                    entry["concept_used"] = candidate
-
-                if candidate != concept:
-                    logger.info(
-                        f"{ticker}: '{concept}' not found, "
-                        f"used fallback '{candidate}'"
-                    )
-                return result
+                # Check the most recent date for this concept
+                if "period_end" in df.columns:
+                    max_date = df["period_end"].max()
+                    if best_max_date is None or max_date > best_max_date:
+                        best_max_date = max_date
+                        best_candidate = candidate
+                        best_df = df
+                else:
+                    # No period_end column — take what we can get
+                    if best_df is None:
+                        best_candidate = candidate
+                        best_df = df
 
             except Exception as e:
-                logger.error(
-                    f"Failed to extract {candidate} for {ticker}: {e}"
-                )
+                logger.error(f"Failed to query {candidate} for {ticker}: {e}")
                 continue
 
-        return []
+        if best_df is None or best_candidate is None:
+            return []
+
+        df = best_df
+
+        # Deduplicate: many concepts have dimensional breakdowns (segments,
+        # geography, etc.) that produce multiple entries per period_end.
+        # For financial totals, the largest absolute value per period is
+        # typically the consolidated total.  We pick the max-value entry.
+        if "period_end" in df.columns and "numeric_value" in df.columns:
+            df = df.sort_values("numeric_value", ascending=False)
+            df = df.drop_duplicates(subset=["period_end"], keep="first")
+
+        # Sort by period end descending and limit
+        if "period_end" in df.columns:
+            df = df.sort_values("period_end", ascending=False)
+
+        df = df.head(periods)
+
+        # Build result dicts matching the API contract
+        results = []
+        for _, row in df.iterrows():
+            results.append({
+                "end": str(row.get("period_end", "")),
+                "val": row.get("numeric_value") if "numeric_value" in df.columns else row.get("value"),
+                "form": row.get("form_type", ""),
+                "fy": row.get("fiscal_year", ""),
+                "fp": row.get("fiscal_period", ""),
+                "filed": str(row.get("filing_date", "")),
+                "concept_used": best_candidate,
+            })
+
+        if results and best_candidate != concept:
+            logger.info(
+                f"{ticker}: '{concept}' not found or stale, "
+                f"using '{best_candidate}' (most recent data)"
+            )
+
+        return results
+
+    # ── TTM computation ──────────────────────────────────────────────────
 
     def get_financial_ttm(
         self,
@@ -422,25 +456,12 @@ class EdgarClient:
     ) -> Optional[Dict[str, Any]]:
         """
         Compute a Trailing Twelve Months (TTM) value for an income statement
-        or cash flow concept by summing the four most recent quarterly filings.
-
-        For balance sheet / instantaneous concepts, returns the most recent
-        quarterly value directly (TTM doesn't apply to point-in-time figures).
-
-        Args:
-            ticker: Stock ticker.
-            concept: XBRL concept name (e.g. "Revenues", "NetIncomeLoss").
-            taxonomy: XBRL taxonomy (default "us-gaap").
-            unit: Unit filter (e.g. "USD", "USD/shares").
-
-        Returns:
-            Dict with keys: ttm_val, periods_used, latest_quarter_end,
-            concept_used, is_instantaneous.  Or None if data unavailable.
+        or cash flow concept by summing four most recent quarterly filings.
+        For balance sheet items, returns the most recent quarterly value.
         """
-        is_instant = concept in self.INSTANTANEOUS_CONCEPTS
+        is_instant = concept in INSTANTANEOUS_CONCEPTS
 
         if is_instant:
-            # For balance sheet items, just return the latest quarter
             rows = self.get_financial_metric(
                 ticker, concept, taxonomy=taxonomy, unit=unit,
                 periods=1, form_types=["10-Q", "10-K"],
@@ -455,14 +476,14 @@ class EdgarClient:
                 "is_instantaneous": True,
             }
 
-        # Income/CF: fetch last 4 quarterly filings and sum them
+        # Income/CF: sum last 4 quarterly filings
         rows = self.get_financial_metric(
             ticker, concept, taxonomy=taxonomy, unit=unit,
             periods=4, form_types=["10-Q"],
         )
 
         if len(rows) < 4:
-            # Fall back to annual if fewer than 4 quarters available
+            # Fall back to annual
             annual = self.get_financial_metric(
                 ticker, concept, taxonomy=taxonomy, unit=unit,
                 periods=1, form_types=["10-K"],
@@ -491,43 +512,7 @@ class EdgarClient:
             "is_instantaneous": False,
         }
 
-    # ── XBRL Frames (cross-company comparison) ─────────────────────────
-    def get_xbrl_frame(
-        self,
-        concept: str,
-        period: str,
-        taxonomy: str = "us-gaap",
-        unit: str = "USD",
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Fetch a single XBRL concept for ALL companies for a given period.
-        Returns one value per company — already deduplicated by the SEC.
-
-        Args:
-            concept: XBRL concept name (e.g. "Revenues", "Assets").
-            period:  Calendar period string.  Format rules:
-                     - Annual duration (income/CF):   "CY2023"
-                     - Quarterly duration (income/CF): "CY2023Q4"
-                     - Instantaneous (balance sheet):  "CY2023Q4I"
-            taxonomy: XBRL taxonomy (default "us-gaap").
-            unit: Unit of measure (e.g. "USD", "USD/shares", "shares").
-
-        Returns:
-            Dict with "data" list of {cik, entityName, val, end, ...} or None.
-        """
-        url = self.XBRL_FRAMES_URL.format(
-            taxonomy=taxonomy, concept=concept, unit=unit, period=period,
-        )
-        try:
-            return self._get(url).json()
-        except requests.HTTPError as e:
-            if e.response is not None and e.response.status_code == 404:
-                return None
-            logger.error(f"Frames request failed: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Frames request failed: {e}")
-            return None
+    # ── Cross-company comparison ─────────────────────────────────────────
 
     def compare_metric_across_companies(
         self,
@@ -539,254 +524,212 @@ class EdgarClient:
         unit: str = "USD",
     ) -> List[Dict[str, Any]]:
         """
-        Compare a single financial metric across multiple companies using
-        the XBRL frames endpoint (one API call for all companies).
-
-        For tickers not found in the primary calendar-period frame (typically
-        companies with non-December fiscal year ends), falls back to individual
-        per-company company-concept queries so no ticker is silently dropped.
-
-        Args:
-            tickers: List of ticker symbols.
-            concept: XBRL concept name.
-            year: Calendar year (e.g. 2023).
-            quarter: Optional quarter (1-4). None = full year.
-            taxonomy: XBRL taxonomy.
-            unit: Unit of measure.
-
-        Returns:
-            List of dicts: {ticker, entity_name, val, concept_used, period}.
+        Compare a single financial metric across multiple companies.
+        Uses per-company FactQuery lookups (edgartools handles caching
+        and rate limiting internally).
         """
-        # Resolve tickers → CIKs
-        cik_map: Dict[str, str] = {}
-        for t in tickers:
-            cik = self.get_cik(t)
-            if cik:
-                cik_map[t.upper()] = cik
-
-        if not cik_map:
-            return []
-
-        # Build CIK → ticker reverse map (strip leading zeros for matching)
-        cik_to_ticker = {int(cik): t for t, cik in cik_map.items()}
-
-        # Determine the period string based on concept type
-        concepts_to_try = self.CONCEPT_ALIASES.get(concept, [concept])
-        if concept not in self.CONCEPT_ALIASES:
-            concepts_to_try = [concept]
-
         results: List[Dict[str, Any]] = []
-        concept_used_final = concept
 
-        for candidate in concepts_to_try:
-            is_instant = candidate in self.INSTANTANEOUS_CONCEPTS
+        for ticker in tickers:
+            ticker = ticker.upper().strip()
+            company = self._get_company(ticker)
+            if not company:
+                continue
 
-            if is_instant:
-                # Balance sheet: instantaneous point-in-time.
-                # For non-December fiscal year companies, also try Q1-Q3
-                # of the same year so we catch March/June/September year-ends.
-                if quarter:
-                    periods_to_try = [f"CY{year}Q{quarter}I"]
-                else:
-                    periods_to_try = [
-                        f"CY{year}Q4I",  # December year-end (most common)
-                        f"CY{year}Q3I",  # September year-end (e.g. Apple)
-                        f"CY{year}Q2I",  # June year-end
-                        f"CY{year}Q1I",  # March year-end
-                    ]
+            # Determine form types and periods to look for
+            if quarter:
+                form_filter = ["10-Q"]
             else:
-                # Income / cash flow: duration-based
-                if quarter:
-                    periods_to_try = [f"CY{year}Q{quarter}"]
-                else:
-                    # Annual: CY{year} covers Dec year-ends.  Non-Dec filers
-                    # won't appear; we catch them in the per-company fallback.
-                    periods_to_try = [f"CY{year}"]
+                form_filter = ["10-K"]
 
-            # --- Batch frames pass ---
-            found_ciks: set = set()
-            for period in periods_to_try:
-                frame_data = self.get_xbrl_frame(
-                    candidate, period, taxonomy=taxonomy, unit=unit,
-                )
-                if not frame_data or not frame_data.get("data"):
-                    continue
-
-                for entry in frame_data["data"]:
-                    entry_cik = entry.get("cik")
-                    ticker = cik_to_ticker.get(entry_cik)
-                    if ticker and ticker not in found_ciks:
-                        found_ciks.add(ticker)
-                        results.append({
-                            "ticker": ticker,
-                            "entity_name": entry.get("entityName", ""),
-                            "val": entry.get("val"),
-                            "end": entry.get("end", ""),
-                            "concept_used": candidate,
-                            "period": period,
-                        })
-
-            if results:
-                concept_used_final = candidate
-                if candidate != concept:
-                    logger.info(
-                        f"Frames: '{concept}' not found, "
-                        f"used fallback '{candidate}'"
-                    )
-                break  # found data with this concept; stop alias iteration
-
-        # --- Per-company fallback for any tickers still missing ---
-        # This covers non-standard fiscal years not caught by the frames sweep.
-        found_tickers = {r["ticker"] for r in results}
-        missing_tickers = [t for t in cik_map if t not in found_tickers]
-
-        for ticker in missing_tickers:
-            logger.info(
-                f"{ticker}: not in XBRL frames for {year}; "
-                "trying per-company concept query"
-            )
-            # For annual queries, grab the most recent annual (10-K) near the target year
-            form_filter = ["10-Q", "10-K"] if quarter else ["10-K"]
             rows = self.get_financial_metric(
                 ticker, concept,
                 taxonomy=taxonomy, unit=unit,
-                periods=4,
+                periods=6,  # get enough to find the right year
                 form_types=form_filter,
             )
             if not rows:
                 continue
 
-            # Pick the row whose fiscal year is closest to the requested year
+            # Find the row closest to the requested year
             best = None
             for row in rows:
                 row_year = int(row.get("end", "0000")[:4])
-                if best is None:
-                    best = row
-                else:
-                    best_year = int(best.get("end", "0000")[:4])
-                    if abs(row_year - year) < abs(best_year - year):
+                if quarter:
+                    # For quarterly, match year AND try to find right quarter
+                    row_fp = row.get("fp", "")
+                    if row_year == year and row_fp == f"Q{quarter}":
                         best = row
+                        break
+                else:
+                    # For annual, find closest fiscal year
+                    if best is None:
+                        best = row
+                    else:
+                        best_year = int(best.get("end", "0000")[:4])
+                        if abs(row_year - year) < abs(best_year - year):
+                            best = row
 
             if best:
+                fy_note = False
+                end_year = int(best.get("end", "0000")[:4])
+                if not quarter and end_year != year:
+                    fy_note = True
+
                 results.append({
                     "ticker": ticker,
-                    "entity_name": ticker,   # entity name unknown from this path
+                    "entity_name": getattr(company, "name", ticker),
                     "val": best["val"],
                     "end": best["end"],
                     "concept_used": best.get("concept_used", concept),
-                    "period": f"FY ending {best['end']} (non-Dec fiscal year)",
-                    "fiscal_year_note": True,
+                    "period": f"FY ending {best['end']}" if not quarter else f"Q{quarter} {year}",
+                    "fiscal_year_note": fy_note,
                 })
 
         return results
 
-    # ── Filing text retrieval ──────────────────────────────────────────
+    # ── Financials via edgartools' Financials API ────────────────────────
 
-    # Sections of interest in 10-K / 10-Q filings.
-    # Regex patterns match common section headings in SEC filings.
-    _SECTION_PATTERNS = [
-        (r"item\s+1[\.\s]", "Item 1"),       # Business
-        (r"item\s+1a[\.\s]", "Item 1A"),      # Risk Factors
-        (r"item\s+7[\.\s]", "Item 7"),        # MD&A
-        (r"item\s+7a[\.\s]", "Item 7A"),      # Market Risk
-        (r"item\s+8[\.\s]", "Item 8"),        # Financial Statements
-    ]
-
-    def _clean_filing_html(self, html: str) -> str:
+    def get_financial_statements(
+        self,
+        ticker: str,
+    ) -> Optional[Dict[str, Any]]:
         """
-        Extract readable text from an SEC filing HTML/iXBRL document.
-        Uses BeautifulSoup to properly handle inline XBRL tags and
-        produce clean, human-readable text.
+        Get structured financial statements (income, balance sheet,
+        cash flow) using edgartools' Financials API.
+
+        Returns a dict with keys: income_statement, balance_sheet,
+        cashflow_statement — each containing a DataFrame-ready structure.
         """
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Remove script, style, and hidden elements
-        for tag in soup.find_all(["script", "style", "meta", "link"]):
-            tag.decompose()
-
-        # Remove XBRL-specific tags but keep their text content
-        # (ix:nonNumeric, ix:nonFraction, ix:header, etc.)
-        for tag in soup.find_all(re.compile(r"^ix:", re.IGNORECASE)):
-            if tag.name and tag.name.lower() == "ix:header":
-                # The ix:header block is pure XBRL metadata — remove entirely
-                tag.decompose()
-            else:
-                # Replace the XBRL wrapper with its text content
-                tag.unwrap()
-
-        # Remove hidden div blocks (XBRL often hides metadata in these)
-        for tag in soup.find_all(
-            "div", style=re.compile(r"display\s*:\s*none", re.IGNORECASE)
-        ):
-            tag.decompose()
-
-        # Get text, collapsing whitespace
-        text = soup.get_text(separator=" ")
-        # Collapse runs of whitespace, but preserve paragraph breaks
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = text.strip()
-
-        return text
-
-    def _find_section_start(self, text: str) -> int:
-        """
-        Find where the actual business content starts by looking for
-        common SEC filing section headings (Item 1, Item 1A, etc.).
-        Returns the character offset, or 0 if no sections found.
-        """
-        text_lower = text.lower()
-        best_pos = len(text)  # start with "no match"
-
-        for pattern, _label in self._SECTION_PATTERNS:
-            match = re.search(pattern, text_lower)
-            if match and match.start() < best_pos:
-                best_pos = match.start()
-
-        return best_pos if best_pos < len(text) else 0
-
-    def get_filing_text(
-        self, ticker: str, form_type: str = "10-K", max_chars: int = 15000
-    ) -> Optional[Dict[str, str]]:
-        """
-        Fetch the most recent filing of a given type and return readable text.
-        Uses BeautifulSoup to strip iXBRL markup and skips the XBRL preamble
-        to start at actual business content.
-
-        Args:
-            ticker: Stock ticker symbol.
-            form_type: SEC form type (default "10-K").
-            max_chars: Max characters to return (default 15000).
-        """
-        filings = self.get_filings(ticker, form_types=[form_type], max_results=1)
-        if not filings:
+        company = self._get_company(ticker)
+        if not company:
             return None
 
-        filing = filings[0]
         try:
-            resp = self._get(filing["url"])
-            raw_html = resp.text
+            financials = company.get_financials()
+            result = {}
 
-            # Clean the HTML/iXBRL into readable text
-            clean = self._clean_filing_html(raw_html)
+            for stmt_name, method_name in [
+                ("income_statement", "income_statement"),
+                ("balance_sheet", "balance_sheet"),
+                ("cashflow_statement", "cashflow_statement"),
+            ]:
+                try:
+                    stmt = getattr(financials, method_name)()
+                    df = stmt.to_dataframe()
 
-            # For 10-K and 10-Q, try to skip to the first section heading
-            if form_type in ("10-K", "10-Q"):
-                section_start = self._find_section_start(clean)
-                if section_start > 0:
-                    clean = clean[section_start:]
+                    # Get period columns (date strings like "2024-09-28")
+                    date_cols = sorted(
+                        [c for c in df.columns if re.match(r"^\d{4}-\d{2}-\d{2}$", str(c))],
+                        reverse=True,
+                    )
 
-            # Truncate to requested size
-            truncated = len(clean) > max_chars
-            clean = clean[:max_chars]
+                    rows = []
+                    for _, row in df.iterrows():
+                        is_abstract = row.get("abstract", False)
+                        if is_abstract:
+                            continue
+                        entry = {
+                            "label": row.get("label", ""),
+                            "concept": row.get("concept", ""),
+                        }
+                        for d in date_cols:
+                            entry[d] = row.get(d)
+                        rows.append(entry)
 
-            return {
-                "form": filing["form"],
-                "date": filing["date"],
-                "url": filing["url"],
-                "text": clean,
-                "truncated": truncated,
-            }
+                    result[stmt_name] = {
+                        "periods": date_cols,
+                        "rows": rows,
+                    }
+                except Exception as e:
+                    logger.warning(f"Could not get {stmt_name} for {ticker}: {e}")
+                    result[stmt_name] = None
+
+            # Also grab quick metrics
+            try:
+                result["quick_metrics"] = {
+                    "revenue": financials.get_revenue(),
+                    "net_income": financials.get_net_income(),
+                    "operating_income": financials.get_operating_income(),
+                    "total_assets": financials.get_total_assets(),
+                    "total_liabilities": financials.get_total_liabilities(),
+                    "stockholders_equity": financials.get_stockholders_equity(),
+                    "operating_cash_flow": financials.get_operating_cash_flow(),
+                    "free_cash_flow": financials.get_free_cash_flow(),
+                    "capital_expenditures": financials.get_capital_expenditures(),
+                }
+            except Exception as e:
+                logger.warning(f"Could not get quick metrics for {ticker}: {e}")
+                result["quick_metrics"] = None
+
+            return result
+
         except Exception as e:
-            logger.error(f"Failed to fetch filing text for {ticker}: {e}")
+            logger.error(f"Failed to get financial statements for {ticker}: {e}")
             return None
+
+    # ── Insider filings with structured data ─────────────────────────────
+
+    def get_insider_filings_detailed(
+        self,
+        ticker: str,
+        max_results: int = 15,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get insider trading filings (Form 3/4/5) with structured data
+        parsed from the XBRL-tagged filing via edgartools' Form4 objects.
+        """
+        company = self._get_company(ticker)
+        if not company:
+            return []
+
+        results = []
+        try:
+            for form_type in ["4", "3", "5"]:
+                try:
+                    filings = company.get_filings(form=form_type)
+                except Exception:
+                    continue
+
+                for f in filings:
+                    if len(results) >= max_results:
+                        break
+
+                    entry = {
+                        "form": f.form,
+                        "date": str(f.filing_date),
+                        "url": f.homepage_url or "",
+                    }
+
+                    # Try to parse the filing as a typed object
+                    try:
+                        obj = f.obj()
+                        if hasattr(obj, "insider_name"):
+                            entry["insider_name"] = obj.insider_name or ""
+                        if hasattr(obj, "position"):
+                            entry["position"] = obj.position or ""
+                        if hasattr(obj, "shares_traded"):
+                            entry["shares_traded"] = obj.shares_traded
+
+                        # Get ownership summary if available
+                        if hasattr(obj, "get_ownership_summary"):
+                            try:
+                                summary = obj.get_ownership_summary()
+                                entry["activity"] = summary.primary_activity
+                                entry["net_change"] = summary.net_change
+                                entry["net_value"] = summary.net_value
+                                entry["remaining_shares"] = summary.remaining_shares
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    results.append(entry)
+
+                if len(results) >= max_results:
+                    break
+
+        except Exception as e:
+            logger.error(f"Failed to get insider filings for {ticker}: {e}")
+
+        return results
