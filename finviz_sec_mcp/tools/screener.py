@@ -24,8 +24,11 @@ def register_screener_tools(server):
         signal: str = "",
         max_results: int = 30,
     ) -> List[TextContent]:
-        """Screen stocks using Finviz filter codes. This is the primary tool
-        for finding value investments.
+        """Screen stocks using Finviz filter codes. Primary tool for finding
+        investment candidates. Uses Finviz current snapshot data (~15-20 min
+        delayed). Returns a filtered list with the metric columns selected by
+        the 'table' parameter. Use list_filter_options to discover all valid
+        filter codes.
 
         Args:
             filters: Comma-separated Finviz filter codes.
@@ -155,6 +158,8 @@ def register_screener_tools(server):
         additional_filters: str = "",
     ) -> List[TextContent]:
         """Quick value stock screener with sensible defaults.
+        Convenience wrapper around screen_stocks — use that tool for
+        full control over filters. Useful for fast idea generation.
 
         Args:
             min_market_cap: Minimum market cap — "small", "mid", "large", "mega".
@@ -227,7 +232,9 @@ def register_screener_tools(server):
 
     @server.tool()
     def screen_from_url(url: str) -> List[TextContent]:
-        """Run a Finviz screener from a URL you copied from finviz.com.
+        """Run a Finviz screener from a URL copied directly from finviz.com.
+        Useful when the user has built a custom screen in the Finviz UI and
+        wants to replicate it here without translating filter codes manually.
 
         Args:
             url: Full Finviz screener URL, e.g.
@@ -270,7 +277,9 @@ def register_screener_tools(server):
     @server.tool()
     def list_filter_options() -> List[TextContent]:
         """List all available Finviz screener filter categories and their codes.
-        Use this to discover valid filter values for screen_stocks.
+        Call this whenever you need to look up a valid filter code before
+        calling screen_stocks or screen_industry. Returns ~67 categories
+        with valid code values (e.g. cap_largeover, fa_pe_u20, sec_technology).
         """
         try:
             filters_dict = client.get_available_filters()

@@ -122,6 +122,7 @@ def register_sector_tools(server):
         """Compare all market sectors with aggregate metrics from Finviz.
         Returns sector-level aggregates (median P/E, total market cap, etc.)
         for all 11 sectors in a single view.
+        Data source: Finviz groups page (current snapshot).
 
         Args:
             view: Data view to return. Options:
@@ -156,6 +157,8 @@ def register_sector_tools(server):
     ) -> List[TextContent]:
         """Compare all industries with aggregate metrics from Finviz.
         Returns industry-level aggregates for all ~144 industries.
+        Data source: Finviz groups page (current snapshot).
+        To screen stocks within a specific industry, use screen_industry.
 
         Args:
             view: Data view — "overview", "valuation", or "performance".
@@ -183,6 +186,8 @@ def register_sector_tools(server):
         Compares the stock's metrics against industry aggregates across
         overview (P/E, PEG, Debt, Dividend), valuation (P/S, P/B, P/FCF,
         EPS growth), and performance (weekly through YTD returns).
+        Shows absolute stock value, industry median, and delta for each metric.
+        Data source: Finviz (current snapshot for both stock and industry).
 
         Args:
             ticker: Stock ticker symbol (e.g. "AAPL", "BRK-B").
@@ -280,7 +285,10 @@ def register_sector_tools(server):
         additional_filters: str = "",
         max_results: int = 20,
     ) -> List[TextContent]:
-        """Screen stocks within a specific industry.
+        """Screen stocks within a specific industry using Finviz.
+        Convenience wrapper around screen_stocks that pre-applies the
+        ind_ filter. Useful for peer group analysis or sector deep-dives.
+        Use list_filter_options to look up valid industry codes.
 
         Args:
             industry: Finviz industry code, e.g.:
