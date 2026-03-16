@@ -345,6 +345,17 @@ class EdgarClient:
 
         allowed_forms = set(form_types) if form_types else {"10-K", "10-Q"}
 
+        # Derive fiscal-period filter from form_types.
+        # 10-K filings contain BOTH the annual total (fp="FY") AND quarterly
+        # sub-periods (fp="Q1"/"Q2"/"Q3") for comparison.  Without fp filtering,
+        # "annual" requests return quarterly figures mixed into the series.
+        if form_types and set(form_types) == {"10-K"}:
+            allowed_fp: Optional[set] = {"FY"}
+        elif form_types and set(form_types) == {"10-Q"}:
+            allowed_fp = {"Q1", "Q2", "Q3", "Q4"}
+        else:
+            allowed_fp = None  # no fp restriction when mixing form types
+
         # Build the list of concept names to try
         concepts_to_try = self.CONCEPT_ALIASES.get(concept, [concept])
         if concept not in self.CONCEPT_ALIASES:
@@ -371,6 +382,7 @@ class EdgarClient:
                     }
                     for entry in concept_data
                     if entry.get("form") in allowed_forms
+                    and (allowed_fp is None or entry.get("fp") in allowed_fp)
                 ]
 
                 if not filtered:
