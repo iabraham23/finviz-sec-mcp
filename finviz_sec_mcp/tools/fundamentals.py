@@ -57,8 +57,13 @@ def register_fundamentals_tools(server):
 
     @server.tool()
     def get_stock_fundamentals(ticker: str) -> List[TextContent]:
-        """Get comprehensive fundamental data for a stock.
-        Primarily focused on value-oriented performance as this is my particular interest.
+        """Get comprehensive fundamental data for a stock from Finviz.
+        Returns a current snapshot (~15-20 min delayed) covering valuation
+        ratios, profitability metrics, balance sheet highlights, ownership,
+        and technical indicators across 90+ fields.
+
+        Data source: Finviz (current snapshot).
+        For historical time-series data use get_financial_history or get_financial_ttm.
 
         Args:
             ticker: Stock ticker symbol (e.g. "AAPL", "BRK-B").
@@ -106,12 +111,18 @@ def register_fundamentals_tools(server):
     @server.tool()
     def compare_stocks(tickers: str, metrics: str = "") -> List[TextContent]:
         """Compare fundamental metrics across multiple stocks side-by-side.
+        Uses Finviz current snapshot data (~15-20 min delayed).
+        All values are point-in-time — for historical comparisons across years
+        use compare_financials (SEC XBRL actuals) instead.
 
         Args:
             tickers: Comma-separated tickers, e.g. "AAPL,MSFT,GOOGL"
             metrics: Optional comma-separated metric names to compare.
                      If empty, uses default value-investing metrics:
-                     P/E, P/B, ROE, Profit Margin, Debt/Eq, Dividend %, EPS next Y
+                     P/E, Forward P/E, P/B, P/FCF, PEG, ROE, ROA,
+                     Profit Margin, Oper. Margin, Debt/Eq, Current Ratio,
+                     Dividend %, EPS (ttm), EPS next Y, EPS past 5Y,
+                     Market Cap, Price
         """
         try:
             ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]

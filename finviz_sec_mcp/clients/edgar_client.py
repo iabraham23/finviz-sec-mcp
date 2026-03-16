@@ -73,6 +73,35 @@ class EdgarClient:
             "OperatingIncomeLoss",
             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
         ],
+        "GrossProfit": [
+            "GrossProfit",
+        ],
+        "SellingGeneralAndAdministrativeExpense": [
+            "SellingGeneralAndAdministrativeExpense",
+            "GeneralAndAdministrativeExpense",
+            "SellingAndMarketingExpense",
+            "SellingExpense",
+        ],
+        "ResearchAndDevelopmentExpense": [
+            "ResearchAndDevelopmentExpense",
+            "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
+        ],
+        "InterestExpense": [
+            "InterestExpense",
+            "InterestExpenseDebt",
+            "InterestAndDebtExpense",
+            "InterestCostsIncurred",
+        ],
+        "IncomeTaxExpenseBenefit": [
+            "IncomeTaxExpenseBenefit",
+            "IncomeTaxesPaidNet",
+        ],
+        "EarningsPerShareBasic": [
+            "EarningsPerShareBasic",
+        ],
+        "EarningsPerShareDiluted": [
+            "EarningsPerShareDiluted",
+        ],
         "LongTermDebt": [
             "LongTermDebt",
             "LongTermDebtNoncurrent",
@@ -288,6 +317,7 @@ class EdgarClient:
         taxonomy: str = "us-gaap",
         unit: str = "USD",
         periods: int = 8,
+        form_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Extract a specific financial metric from XBRL data.
@@ -302,6 +332,9 @@ class EdgarClient:
             taxonomy: XBRL taxonomy (default "us-gaap").
             unit: Unit filter (e.g. "USD", "USD/shares").
             periods: Number of recent periods to return.
+            form_types: Restrict to specific form types, e.g. ["10-K"] for
+                        annual-only or ["10-Q"] for quarterly-only.
+                        Defaults to both 10-K and 10-Q.
 
         Returns:
             List of dicts with keys: end, val, form, fy, fp, filed, concept_used.
@@ -309,6 +342,8 @@ class EdgarClient:
         cik = self.get_cik(ticker)
         if not cik:
             return []
+
+        allowed_forms = set(form_types) if form_types else {"10-K", "10-Q"}
 
         # Build the list of concept names to try
         concepts_to_try = self.CONCEPT_ALIASES.get(concept, [concept])
@@ -335,7 +370,7 @@ class EdgarClient:
                         "filed": entry.get("filed"),
                     }
                     for entry in concept_data
-                    if entry.get("form") in ("10-K", "10-Q")
+                    if entry.get("form") in allowed_forms
                 ]
 
                 if not filtered:
@@ -365,6 +400,84 @@ class EdgarClient:
                 continue
 
         return []
+
+    def get_financial_ttm(
+        self,
+        ticker: str,
+        concept: str,
+        taxonomy: str = "us-gaap",
+        unit: str = "USD",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Compute a Trailing Twelve Months (TTM) value for an income statement
+        or cash flow concept by summing the four most recent quarterly filings.
+
+        For balance sheet / instantaneous concepts, returns the most recent
+        quarterly value directly (TTM doesn't apply to point-in-time figures).
+
+        Args:
+            ticker: Stock ticker.
+            concept: XBRL concept name (e.g. "Revenues", "NetIncomeLoss").
+            taxonomy: XBRL taxonomy (default "us-gaap").
+            unit: Unit filter (e.g. "USD", "USD/shares").
+
+        Returns:
+            Dict with keys: ttm_val, periods_used, latest_quarter_end,
+            concept_used, is_instantaneous.  Or None if data unavailable.
+        """
+        is_instant = concept in self.INSTANTANEOUS_CONCEPTS
+
+        if is_instant:
+            # For balance sheet items, just return the latest quarter
+            rows = self.get_financial_metric(
+                ticker, concept, taxonomy=taxonomy, unit=unit,
+                periods=1, form_types=["10-Q", "10-K"],
+            )
+            if not rows:
+                return None
+            return {
+                "ttm_val": rows[0]["val"],
+                "periods_used": 1,
+                "latest_quarter_end": rows[0]["end"],
+                "concept_used": rows[0].get("concept_used", concept),
+                "is_instantaneous": True,
+            }
+
+        # Income/CF: fetch last 4 quarterly filings and sum them
+        rows = self.get_financial_metric(
+            ticker, concept, taxonomy=taxonomy, unit=unit,
+            periods=4, form_types=["10-Q"],
+        )
+
+        if len(rows) < 4:
+            # Fall back to annual if fewer than 4 quarters available
+            annual = self.get_financial_metric(
+                ticker, concept, taxonomy=taxonomy, unit=unit,
+                periods=1, form_types=["10-K"],
+            )
+            if annual:
+                r = annual[0]
+                return {
+                    "ttm_val": r["val"],
+                    "periods_used": 1,
+                    "latest_quarter_end": r["end"],
+                    "concept_used": r.get("concept_used", concept),
+                    "is_instantaneous": False,
+                    "note": "Fewer than 4 quarters available — using most recent annual.",
+                }
+            return None
+
+        ttm_val = sum(r["val"] for r in rows if r.get("val") is not None)
+        return {
+            "ttm_val": ttm_val,
+            "periods_used": len(rows),
+            "latest_quarter_end": rows[0]["end"],
+            "quarters": [
+                {"end": r["end"], "val": r["val"]} for r in rows
+            ],
+            "concept_used": rows[0].get("concept_used", concept),
+            "is_instantaneous": False,
+        }
 
     # ── XBRL Frames (cross-company comparison) ─────────────────────────
     def get_xbrl_frame(
@@ -417,6 +530,10 @@ class EdgarClient:
         Compare a single financial metric across multiple companies using
         the XBRL frames endpoint (one API call for all companies).
 
+        For tickers not found in the primary calendar-period frame (typically
+        companies with non-December fiscal year ends), falls back to individual
+        per-company company-concept queries so no ticker is silently dropped.
+
         Args:
             tickers: List of ticker symbols.
             concept: XBRL concept name.
@@ -446,52 +563,110 @@ class EdgarClient:
         if concept not in self.CONCEPT_ALIASES:
             concepts_to_try = [concept]
 
+        results: List[Dict[str, Any]] = []
+        concept_used_final = concept
+
         for candidate in concepts_to_try:
             is_instant = candidate in self.INSTANTANEOUS_CONCEPTS
 
             if is_instant:
-                # Balance sheet: instantaneous point-in-time
+                # Balance sheet: instantaneous point-in-time.
+                # For non-December fiscal year companies, also try Q1-Q3
+                # of the same year so we catch March/June/September year-ends.
                 if quarter:
-                    period = f"CY{year}Q{quarter}I"
+                    periods_to_try = [f"CY{year}Q{quarter}I"]
                 else:
-                    period = f"CY{year}Q4I"  # year-end snapshot
+                    periods_to_try = [
+                        f"CY{year}Q4I",  # December year-end (most common)
+                        f"CY{year}Q3I",  # September year-end (e.g. Apple)
+                        f"CY{year}Q2I",  # June year-end
+                        f"CY{year}Q1I",  # March year-end
+                    ]
             else:
-                # Income / cash flow: duration
+                # Income / cash flow: duration-based
                 if quarter:
-                    period = f"CY{year}Q{quarter}"
+                    periods_to_try = [f"CY{year}Q{quarter}"]
                 else:
-                    period = f"CY{year}"
+                    # Annual: CY{year} covers Dec year-ends.  Non-Dec filers
+                    # won't appear; we catch them in the per-company fallback.
+                    periods_to_try = [f"CY{year}"]
 
-            frame_data = self.get_xbrl_frame(
-                candidate, period, taxonomy=taxonomy, unit=unit,
-            )
-            if not frame_data or not frame_data.get("data"):
-                continue
+            # --- Batch frames pass ---
+            found_ciks: set = set()
+            for period in periods_to_try:
+                frame_data = self.get_xbrl_frame(
+                    candidate, period, taxonomy=taxonomy, unit=unit,
+                )
+                if not frame_data or not frame_data.get("data"):
+                    continue
 
-            # Filter to only the requested tickers
-            results = []
-            for entry in frame_data["data"]:
-                entry_cik = entry.get("cik")
-                ticker = cik_to_ticker.get(entry_cik)
-                if ticker:
-                    results.append({
-                        "ticker": ticker,
-                        "entity_name": entry.get("entityName", ""),
-                        "val": entry.get("val"),
-                        "end": entry.get("end", ""),
-                        "concept_used": candidate,
-                        "period": period,
-                    })
+                for entry in frame_data["data"]:
+                    entry_cik = entry.get("cik")
+                    ticker = cik_to_ticker.get(entry_cik)
+                    if ticker and ticker not in found_ciks:
+                        found_ciks.add(ticker)
+                        results.append({
+                            "ticker": ticker,
+                            "entity_name": entry.get("entityName", ""),
+                            "val": entry.get("val"),
+                            "end": entry.get("end", ""),
+                            "concept_used": candidate,
+                            "period": period,
+                        })
 
             if results:
+                concept_used_final = candidate
                 if candidate != concept:
                     logger.info(
                         f"Frames: '{concept}' not found, "
                         f"used fallback '{candidate}'"
                     )
-                return results
+                break  # found data with this concept; stop alias iteration
 
-        return []
+        # --- Per-company fallback for any tickers still missing ---
+        # This covers non-standard fiscal years not caught by the frames sweep.
+        found_tickers = {r["ticker"] for r in results}
+        missing_tickers = [t for t in cik_map if t not in found_tickers]
+
+        for ticker in missing_tickers:
+            logger.info(
+                f"{ticker}: not in XBRL frames for {year}; "
+                "trying per-company concept query"
+            )
+            # For annual queries, grab the most recent annual (10-K) near the target year
+            form_filter = ["10-Q", "10-K"] if quarter else ["10-K"]
+            rows = self.get_financial_metric(
+                ticker, concept,
+                taxonomy=taxonomy, unit=unit,
+                periods=4,
+                form_types=form_filter,
+            )
+            if not rows:
+                continue
+
+            # Pick the row whose fiscal year is closest to the requested year
+            best = None
+            for row in rows:
+                row_year = int(row.get("end", "0000")[:4])
+                if best is None:
+                    best = row
+                else:
+                    best_year = int(best.get("end", "0000")[:4])
+                    if abs(row_year - year) < abs(best_year - year):
+                        best = row
+
+            if best:
+                results.append({
+                    "ticker": ticker,
+                    "entity_name": ticker,   # entity name unknown from this path
+                    "val": best["val"],
+                    "end": best["end"],
+                    "concept_used": best.get("concept_used", concept),
+                    "period": f"FY ending {best['end']} (non-Dec fiscal year)",
+                    "fiscal_year_note": True,
+                })
+
+        return results
 
     # ── Filing text retrieval ──────────────────────────────────────────
 

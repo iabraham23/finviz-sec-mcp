@@ -27,7 +27,9 @@ def register_analyst_tools(server):
     def get_analyst_ratings(
         ticker: str, count: int = 10
     ) -> List[TextContent]:
-        """Get analyst price targets and ratings for a stock.
+        """Get analyst price targets and ratings for a stock from Finviz.
+        Shows date, analyst firm, rating action, and price target (from/to).
+        Useful for gauging sell-side sentiment and consensus target price.
 
         Args:
             ticker: Stock ticker symbol.
@@ -73,8 +75,10 @@ def register_analyst_tools(server):
 
     @server.tool()
     def get_insider_activity(ticker: str) -> List[TextContent]:
-        """Get insider trading activity from Finviz.
-        Shows recent insider buys/sells — useful for gauging management conviction.
+        """Get recent insider trading activity (buys/sells) from Finviz.
+        Shows insider name, relationship to company, transaction type, date,
+        share count, and dollar value. Useful for gauging management conviction.
+        For SEC Form 3/4/5 filings with EDGAR links, use get_insider_filings.
 
         Args:
             ticker: Stock ticker symbol.
@@ -115,7 +119,9 @@ def register_analyst_tools(server):
 
     @server.tool()
     def get_stock_news(ticker: str, count: int = 10) -> List[TextContent]:
-        """Get recent news headlines for a stock.
+        """Get recent news headlines for a stock from Finviz.
+        Returns headlines with source, timestamp, and URL.
+        For earnings-specific headlines only, use get_earnings_news.
 
         Args:
             ticker: Stock ticker symbol.
@@ -150,9 +156,11 @@ def register_analyst_tools(server):
 
     @server.tool()
     def get_earnings_news(ticker: str, count: int = 10) -> List[TextContent]:
-        """Get recent earnings-related headlines for a stock.
-        This filters the generic Finviz news feed for earnings, results,
-        guidance, conference call, webcast, and transcript headlines.
+        """Get earnings-related headlines for a stock from Finviz.
+        Filters the full news feed to only headlines containing keywords:
+        earnings, results, guidance, conference call, webcast, transcript.
+        Use this for post-earnings analysis or when building an earnings update.
+        For all news (not just earnings), use get_stock_news.
 
         Args:
             ticker: Stock ticker symbol.
