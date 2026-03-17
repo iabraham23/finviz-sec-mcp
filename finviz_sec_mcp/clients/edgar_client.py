@@ -275,6 +275,112 @@ class EdgarClient:
 
         return best_pos if best_pos < len(text) else 0
 
+    # ── Filing section extraction via TenK/TenQ objects ──────────────────
+
+    # Section label map for display purposes
+    _SECTION_LABELS = {
+        "Item 1":  "Business",
+        "Item 1A": "Risk Factors",
+        "Item 1B": "Unresolved Staff Comments",
+        "Item 2":  "Properties",
+        "Item 3":  "Legal Proceedings",
+        "Item 7":  "Management's Discussion and Analysis",
+        "Item 7A": "Quantitative and Qualitative Disclosures About Market Risk",
+        "Item 8":  "Financial Statements",
+        "Item 9A": "Controls and Procedures",
+    }
+
+    def get_filing_sections(
+        self,
+        ticker: str,
+        form_type: str = "10-K",
+        sections: Optional[List[str]] = None,
+        max_chars_per_section: int = 8000,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fetch specific named sections from a 10-K or 10-Q filing using
+        edgartools' structured TenK/TenQ objects.  Returns clean prose text
+        for each requested section without iXBRL preamble overhead.
+
+        Falls back to the raw-text approach for non-annual/quarterly forms
+        (e.g. 8-K) or if the structured object cannot be built.
+
+        Args:
+            ticker: Stock ticker symbol.
+            form_type: SEC form type (default "10-K").
+            sections: List of item names to fetch.  Supports full names
+                ("Item 7"), short numbers ("7", "1A"), and friendly aliases
+                ("mda", "risk_factors", "business").
+                Default: ["Item 7", "Item 1A"] (MD&A + Risk Factors).
+            max_chars_per_section: Max characters per section (default 8000).
+        """
+        if sections is None:
+            sections = ["Item 7", "Item 1A"]
+
+        company = self._get_company(ticker)
+        if not company:
+            return None
+
+        try:
+            filing = company.latest(form_type)
+            if not filing:
+                return None
+
+            # Only attempt structured section access for 10-K / 10-Q
+            if form_type in ("10-K", "10-Q"):
+                try:
+                    obj = filing.obj()
+                    if obj is not None:
+                        available_items = []
+                        try:
+                            available_items = list(obj.items)
+                        except Exception:
+                            pass
+
+                        extracted: Dict[str, str] = {}
+                        for section in sections:
+                            try:
+                                text = obj[section]
+                                if text:
+                                    text = str(text)
+                                    truncated = len(text) > max_chars_per_section
+                                    text = text[:max_chars_per_section]
+                                    if truncated:
+                                        text += f"\n[Truncated to {max_chars_per_section:,} chars — pass a larger max_chars_per_section for more]"
+                                    extracted[section] = text
+                            except Exception as e:
+                                logger.debug(
+                                    f"Section '{section}' not found in {ticker} "
+                                    f"{form_type}: {e}"
+                                )
+
+                        return {
+                            "form": filing.form,
+                            "date": str(filing.filing_date),
+                            "url": filing.homepage_url or "",
+                            "sections": extracted,
+                            "available_items": available_items,
+                            "method": "structured",
+                        }
+                except Exception as e:
+                    logger.warning(
+                        f"Could not build structured object for {ticker} "
+                        f"{form_type}, falling back to text: {e}"
+                    )
+
+            # Fallback: raw text with char limit across all sections combined
+            total_chars = max_chars_per_section * len(sections)
+            raw = self.get_filing_text(ticker, form_type=form_type, max_chars=total_chars)
+            if raw:
+                raw["sections"] = {"text": raw.pop("text", "")}
+                raw["available_items"] = []
+                raw["method"] = "raw_text"
+            return raw
+
+        except Exception as e:
+            logger.error(f"Failed to fetch filing sections for {ticker}: {e}")
+            return None
+
     # ── Financial metrics via FactQuery ──────────────────────────────────
 
     def get_financial_metric(
@@ -501,10 +607,35 @@ class EdgarClient:
             return None
 
         ttm_val = sum(r["val"] for r in rows if r.get("val") is not None)
+        ttm_end = rows[0]["end"]
+
+        # If a more-recent annual (10-K) has been filed since the last 10-Q,
+        # it contains Q4 data that our 10-Q sum can never include.  In that
+        # case the annual IS the TTM and is strictly more current.
+        annual = self.get_financial_metric(
+            ticker, concept, taxonomy=taxonomy, unit=unit,
+            periods=1, form_types=["10-K"],
+        )
+        if annual:
+            annual_end = annual[0]["end"]
+            # ISO-8601 strings compare correctly as plain strings
+            if annual_end > ttm_end:
+                return {
+                    "ttm_val": annual[0]["val"],
+                    "periods_used": 1,
+                    "latest_quarter_end": annual_end,
+                    "concept_used": annual[0].get("concept_used", concept),
+                    "is_instantaneous": False,
+                    "note": (
+                        f"FY annual (10-K ending {annual_end}) is more current "
+                        f"than 4Q TTM (ending {ttm_end}); Q4 now included."
+                    ),
+                }
+
         return {
             "ttm_val": ttm_val,
             "periods_used": len(rows),
-            "latest_quarter_end": rows[0]["end"],
+            "latest_quarter_end": ttm_end,
             "quarters": [
                 {"end": r["end"], "val": r["val"]} for r in rows
             ],
