@@ -114,24 +114,40 @@ def register_sec_tools(server):
     def get_filing_text(
         ticker: str,
         form_type: str = "10-K",
-        max_chars: int = 15000,
+        sections: str = "Item 7,Item 1A",
+        max_chars_per_section: int = 8000,
     ) -> List[TextContent]:
-        """Fetch and return the text content of the most recent SEC filing.
-        Uses edgartools' built-in text extraction for clean, readable output
-        with iXBRL markup properly stripped.
-        Useful for reading risk factors, MD&A, and business descriptions.
-        For structured financial data use get_financial_history or
-        get_financial_snapshot instead.
+        """Fetch specific narrative sections from the most recent SEC filing.
+        For 10-K and 10-Q filings, uses edgartools' structured TenK/TenQ
+        objects to pull named items directly — no iXBRL overhead, no
+        wasted character budget on table-of-contents boilerplate.
+        For other form types (8-K, etc.), falls back to full-text extraction.
 
         Args:
             ticker: Stock ticker symbol.
             form_type: Form to fetch — "10-K", "10-Q", "8-K", etc.
-            max_chars: Max characters to return (default 15000).
-                       Larger values give more context but use more tokens.
+            sections: Comma-separated list of items to retrieve (10-K/10-Q only).
+                Default "Item 7,Item 1A" returns MD&A + Risk Factors.
+                Supported formats:
+                  Full:     "Item 1", "Item 1A", "Item 7", "Item 7A", "Item 8"
+                  Short:    "1", "1A", "7", "7A"
+                  Aliases:  "mda", "risk_factors", "business"
+                Pass sections="" to get Item 7 + Item 1A (same as default).
+                Use get_sec_filings first to confirm available items.
+            max_chars_per_section: Max characters per section (default 8000).
+                Each section is truncated independently.
         """
         try:
-            result = edgar.get_filing_text(
-                ticker, form_type=form_type, max_chars=max_chars
+            # Parse sections list; fall back to defaults
+            section_list = [s.strip() for s in sections.split(",") if s.strip()]
+            if not section_list:
+                section_list = ["Item 7", "Item 1A"]
+
+            result = edgar.get_filing_sections(
+                ticker,
+                form_type=form_type,
+                sections=section_list,
+                max_chars_per_section=max_chars_per_section,
             )
 
             if not result:
@@ -141,17 +157,60 @@ def register_sec_tools(server):
                          f"The company may not have filed this form type.",
                 )]
 
+            # Section label map (mirrors edgar_client)
+            _SECTION_LABELS = {
+                "Item 1":  "Business",
+                "Item 1A": "Risk Factors",
+                "Item 1B": "Unresolved Staff Comments",
+                "Item 2":  "Properties",
+                "Item 3":  "Legal Proceedings",
+                "Item 7":  "Management's Discussion and Analysis",
+                "Item 7A": "Quantitative and Qualitative Disclosures",
+                "Item 8":  "Financial Statements",
+                "Item 9A": "Controls and Procedures",
+            }
+
+            method = result.get("method", "structured")
             lines = [
                 f"SEC Filing: {result['form']} for {ticker.upper()}",
                 f"Filed: {result['date']}",
                 f"Source: {result['url']}",
             ]
-            if result.get("truncated"):
+
+            extracted = result.get("sections", {})
+            available = result.get("available_items", [])
+
+            if method == "structured":
                 lines.append(
-                    f"(Truncated to {max_chars:,} characters — "
-                    f"increase max_chars for more)"
+                    f"Sections: {', '.join(extracted.keys()) or 'none found'}"
                 )
-            lines.extend(["", "=" * 60, "", result["text"]])
+                if available:
+                    lines.append(
+                        f"Available items: {', '.join(str(i) for i in available)}"
+                    )
+            lines.append("=" * 60)
+
+            if method == "raw_text":
+                # Fallback path — single text blob
+                lines.extend(["", extracted.get("text", "(no text)")])
+            else:
+                for section_name, text in extracted.items():
+                    label = _SECTION_LABELS.get(section_name, section_name)
+                    lines.extend([
+                        "",
+                        f"── {section_name}: {label} ──",
+                        "",
+                        text,
+                    ])
+
+                if not extracted:
+                    found_names = ", ".join(str(i) for i in available) if available else "unknown"
+                    lines.extend([
+                        "",
+                        f"None of the requested sections ({', '.join(section_list)}) "
+                        f"were found in this filing.",
+                        f"Available items: {found_names}",
+                    ])
 
             return [TextContent(type="text", text="\n".join(lines))]
 
