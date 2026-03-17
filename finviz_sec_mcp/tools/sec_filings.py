@@ -157,8 +157,9 @@ def register_sec_tools(server):
                          f"The company may not have filed this form type.",
                 )]
 
-            # Section label map (mirrors edgar_client)
-            _SECTION_LABELS = {
+            # Section label maps — 10-K and 10-Q use different item numbers
+            # for the same content (e.g. MD&A is Item 7 in 10-K, Item 2 in 10-Q).
+            _10K_LABELS = {
                 "Item 1":  "Business",
                 "Item 1A": "Risk Factors",
                 "Item 1B": "Unresolved Staff Comments",
@@ -169,6 +170,15 @@ def register_sec_tools(server):
                 "Item 8":  "Financial Statements",
                 "Item 9A": "Controls and Procedures",
             }
+            _10Q_LABELS = {
+                "Item 1":  "Financial Statements",
+                "Item 1A": "Risk Factors",
+                "Item 2":  "Management's Discussion and Analysis",
+                "Item 3":  "Quantitative and Qualitative Disclosures",
+                "Item 4":  "Controls and Procedures",
+            }
+            filing_form = result.get("form", form_type)
+            _SECTION_LABELS = _10Q_LABELS if "10-Q" in filing_form else _10K_LABELS
 
             method = result.get("method", "structured")
             lines = [

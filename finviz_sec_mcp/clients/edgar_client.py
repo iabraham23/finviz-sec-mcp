@@ -170,23 +170,27 @@ class EdgarClient:
             return []
 
         try:
-            # Get filings, optionally filtered by form type
-            if form_types and len(form_types) == 1:
-                filings = company.get_filings(form=form_types[0])
-            elif form_types:
-                # edgartools supports a single form filter;
-                # for multiple, get all and filter in-memory
-                filings = company.get_filings()
+            # Compute a 5-year lookback date for unfiltered queries to avoid
+            # fetching the entire EDGAR submissions history (which can be
+            # thousands of records for large-cap companies).
+            import datetime as _dt
+            _five_years_ago = (
+                _dt.date.today() - _dt.timedelta(days=1825)
+            ).isoformat()
+
+            # Get filings, optionally filtered by form type.
+            # edgartools v5+ accepts a list directly; for a single form or
+            # multiple forms we can pass them all at once.
+            if form_types:
+                form_arg = form_types[0] if len(form_types) == 1 else form_types
+                filings = company.get_filings(form=form_arg)
             else:
-                filings = company.get_filings()
+                # No form filter — limit to recent 5 years to keep the query
+                # fast and avoid downloading the full submissions history.
+                filings = company.get_filings(date=f"{_five_years_ago}:")
 
             results = []
             for f in filings:
-                # Apply multi-form filter if needed
-                if form_types and len(form_types) > 1:
-                    if f.form not in form_types:
-                        continue
-
                 results.append({
                     "form": f.form,
                     "date": str(f.filing_date),
@@ -290,6 +294,37 @@ class EdgarClient:
         "Item 9A": "Controls and Procedures",
     }
 
+    # Alias → canonical "Item X" name for get_filing_sections
+    _SECTION_ALIASES: Dict[str, str] = {
+        # Friendly lowercase aliases
+        "mda": "Item 7",
+        "risk_factors": "Item 1A",
+        "business": "Item 1",
+        # Short numeric forms (no "Item " prefix)
+        "1": "Item 1",
+        "1a": "Item 1A",
+        "1b": "Item 1B",
+        "1c": "Item 1C",
+        "2": "Item 2",
+        "3": "Item 3",
+        "7": "Item 7",
+        "7a": "Item 7A",
+        "8": "Item 8",
+        "9a": "Item 9A",
+    }
+
+    @classmethod
+    def _resolve_section(cls, name: str) -> str:
+        """Normalise a user-supplied section name to canonical 'Item X' form."""
+        key = name.strip().lower()
+        if key in cls._SECTION_ALIASES:
+            return cls._SECTION_ALIASES[key]
+        # Already looks like "Item N" (case-insensitive) – normalise capitalisation
+        m = re.match(r'^item\s+(.+)$', key)
+        if m:
+            return f"Item {m.group(1).upper()}"
+        return name  # pass through unchanged
+
     def get_filing_sections(
         self,
         ticker: str,
@@ -317,6 +352,11 @@ class EdgarClient:
         if sections is None:
             sections = ["Item 7", "Item 1A"]
 
+        # Resolve aliases / short forms to canonical "Item X" names.
+        # Keep the original user-supplied name as the key in the output so
+        # the caller sees what they asked for.
+        resolved: Dict[str, str] = {s: self._resolve_section(s) for s in sections}
+
         company = self._get_company(ticker)
         if not company:
             return None
@@ -333,24 +373,31 @@ class EdgarClient:
                     if obj is not None:
                         available_items = []
                         try:
-                            available_items = list(obj.items)
+                            # Deduplicate while preserving order
+                            raw_items = list(obj.items)
+                            seen: set = set()
+                            for item in raw_items:
+                                key = str(item)
+                                if key not in seen:
+                                    seen.add(key)
+                                    available_items.append(item)
                         except Exception:
                             pass
 
                         extracted: Dict[str, str] = {}
-                        for section in sections:
+                        for orig_name, canonical in resolved.items():
                             try:
-                                text = obj[section]
+                                text = obj[canonical]
                                 if text:
                                     text = str(text)
                                     truncated = len(text) > max_chars_per_section
                                     text = text[:max_chars_per_section]
                                     if truncated:
                                         text += f"\n[Truncated to {max_chars_per_section:,} chars — pass a larger max_chars_per_section for more]"
-                                    extracted[section] = text
+                                    extracted[orig_name] = text
                             except Exception as e:
                                 logger.debug(
-                                    f"Section '{section}' not found in {ticker} "
+                                    f"Section '{canonical}' not found in {ticker} "
                                     f"{form_type}: {e}"
                                 )
 
@@ -368,8 +415,9 @@ class EdgarClient:
                         f"{form_type}, falling back to text: {e}"
                     )
 
-            # Fallback: raw text with char limit across all sections combined
-            total_chars = max_chars_per_section * len(sections)
+            # Fallback: raw text — cap at a reasonable limit regardless of
+            # how many sections were requested to avoid huge EDGAR downloads.
+            total_chars = min(max_chars_per_section * len(sections), 12000)
             raw = self.get_filing_text(ticker, form_type=form_type, max_chars=total_chars)
             if raw:
                 raw["sections"] = {"text": raw.pop("text", "")}
