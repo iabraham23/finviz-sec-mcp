@@ -4,6 +4,8 @@ A **free** MCP server for stock research using Finviz screening and SEC EDGAR fi
 
 Works with any MCP-compatible client: Claude Desktop, Claude Code, Cursor, Windsurf, Cline, Zed, and more.
 
+https://financial-research-finviz-sec-mcp.onrender.com/mcp 
+
 ## Collaboration Preference
 
 This project is released under the MIT license. If you build on it, I would highly prefer and appreciate active collaboration.
