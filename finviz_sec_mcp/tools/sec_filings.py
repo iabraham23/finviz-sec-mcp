@@ -781,13 +781,23 @@ def register_sec_tools(server):
             lines = [
                 f"Per-Share Fundamentals: {ticker.upper()} — {entity_name}",
                 f"Source: SEC EDGAR XBRL (10-K annual filings)",
-                "=" * 100,
+                "=" * 95,
             ]
 
-            # Show concept fallback notes if any
-            for field, concept in concepts.items():
-                if concept:
-                    lines.append(f"  {field}: {concept}")
+            # Show concept fallback notes only when a non-default was used
+            fallbacks = {
+                k: v for k, v in concepts.items()
+                if v and v not in (
+                    "WeightedAverageNumberOfDilutedSharesOutstanding",
+                    "StockholdersEquity", "Goodwill",
+                    "IntangibleAssetsNetExcludingGoodwill", "Revenues",
+                    "NetCashProvidedByUsedInOperatingActivities",
+                    "EarningsPerShareDiluted",
+                )
+            }
+            if fallbacks:
+                notes = ", ".join(f"{k}={v}" for k, v in fallbacks.items())
+                lines.append(f"Concept fallbacks: {notes}")
 
             lines.extend([
                 "",
@@ -800,7 +810,7 @@ def register_sec_tools(server):
                 f"{'EPS':>10}"
                 f"{'Revenue(M)':>14}"
                 f"{'OpCF(M)':>14}",
-                "-" * 100,
+                "-" * 95,
             ])
 
             for r in rows:

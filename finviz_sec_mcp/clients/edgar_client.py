@@ -504,14 +504,26 @@ class EdgarClient:
 
         for candidate in concepts_to_try:
             try:
-                # Build query with form type filter applied via edgartools API
-                query = facts.query().by_concept(candidate)
+                # Use exact matching with us-gaap namespace to avoid
+                # substring collisions (e.g. "StockholdersEquity" matching
+                # "LiabilitiesAndStockholdersEquity").
+                query = facts.query().by_concept(
+                    f"us-gaap:{candidate}", exact=True
+                )
 
                 # Apply form type filter via edgartools if single form
                 if form_types and len(form_types) == 1:
                     query = query.by_form_type(form_types[0])
 
                 df = query.to_dataframe()
+
+                # Fallback to regex for non-US-GAAP filers (e.g. IFRS)
+                if (df is None or df.empty):
+                    query = facts.query().by_concept(candidate)
+                    if form_types and len(form_types) == 1:
+                        query = query.by_form_type(form_types[0])
+                    df = query.to_dataframe()
+
                 if df is None or df.empty:
                     continue
 
@@ -730,11 +742,15 @@ class EdgarClient:
         if not company:
             return None
 
-        # Fetch all needed metrics in annual (10-K) series
+        # Fetch all needed metrics in annual (10-K) series.
+        # Over-fetch because 10-K XBRL includes quarterly comparison
+        # data that eats period slots; _by_year deduplicates to annual.
+        fetch_periods = periods * 4
+
         def _fetch(concept: str, unit: str = "USD") -> List[Dict[str, Any]]:
             return self.get_financial_metric(
                 ticker, concept, unit=unit,
-                periods=periods, form_types=["10-K"],
+                periods=fetch_periods, form_types=["10-K"],
             )
 
         shares_data = _fetch("WeightedAverageNumberOfDilutedSharesOutstanding", unit="shares")
@@ -745,18 +761,48 @@ class EdgarClient:
         opcf_data = _fetch("NetCashProvidedByUsedInOperatingActivities")
         eps_data = _fetch("EarningsPerShareDiluted", unit="USD/shares")
 
+        # For revenue and EPS, the ASC 606 transition (~2018) means the
+        # modern concept only has data from ~2019 forward.  Fetch the
+        # legacy concepts and merge so we get full 10-year coverage.
+        for legacy_concept in ["SalesRevenueNet", "SalesRevenueGoodsNet"]:
+            legacy = self.get_financial_metric(
+                ticker, legacy_concept, unit="USD",
+                periods=periods, form_types=["10-K"],
+            )
+            if legacy:
+                revenue_data = revenue_data + legacy
+                break  # one legacy source is enough
+
         if not shares_data and not eps_data and not revenue_data:
             return None
 
-        # Index each metric by fiscal year (period_end year)
+        # Index each metric by fiscal year (period_end year).
+        # Data arrives sorted by period_end DESC.  For each year keep
+        # only the LARGEST value — this picks the annual total over any
+        # quarterly entries that leak through 10-K XBRL comparative data.
+        def _fiscal_year(end: str) -> int:
+            """Map period_end date to fiscal year.
+
+            Companies with 52/53-week fiscal calendars (e.g. JNJ, COST)
+            sometimes have period_end in early January (e.g. 2021-01-03
+            for FY2020).  If the date is in the first 10 days of January
+            we assign it to the prior calendar year.
+            """
+            year = int(end[:4])
+            month_day = end[5:10]  # "MM-DD"
+            if month_day <= "01-10":
+                year -= 1
+            return year
+
         def _by_year(data: List[Dict]) -> Dict[int, float]:
-            result = {}
+            result: Dict[int, float] = {}
             for row in data:
                 end = row.get("end", "")
                 val = row.get("val")
                 if end and val is not None:
-                    year = int(end[:4])
-                    result[year] = val
+                    year = _fiscal_year(end)
+                    if year not in result or abs(val) > abs(result[year]):
+                        result[year] = val
             return result
 
         shares_by_year = _by_year(shares_data)
