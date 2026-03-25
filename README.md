@@ -12,7 +12,7 @@ This is a request about how I would like collaboration to happen, not an additio
 
 ## What You Get
 
-**21 tools** accessible conversationally through any MCP client:
+**23 tools** accessible conversationally through any MCP client:
 
 | Tool | What it does |
 |------|-------------|
@@ -25,6 +25,7 @@ This is a request about how I would like collaboration to happen, not an additio
 | `get_sec_filings` | List recent SEC filings (10-K, 10-Q, 8-K, etc.) |
 | `get_filing_text` | Read clean text of SEC filings (iXBRL properly stripped) |
 | `get_financial_history` | Historical revenue, net income, EPS from XBRL data |
+| `get_per_share_fundamentals` | Historical per-share valuation inputs from SEC XBRL filings |
 | `get_financial_snapshot` | Full income statement, balance sheet & cash flow from latest filing |
 | `get_financial_ttm` | Trailing twelve months for one or more companies |
 | `compare_financials` | Compare a metric across multiple companies for a given year |
@@ -37,6 +38,7 @@ This is a request about how I would like collaboration to happen, not an additio
 | `get_insider_activity` | Insider buy/sell activity |
 | `get_stock_news` | Recent news headlines |
 | `get_earnings_news` | Earnings-related and transcript-related headlines |
+| `get_annual_price_history` | Annual high, low, and average close price history from Yahoo Finance |
 
 ## Data Sources
 
@@ -149,7 +151,7 @@ echo "\"command\": \"$(pwd)/venv/bin/finviz-sec-mcp\""
 ### Step 6: Restart Claude Desktop
 
 Quit and reopen Claude Desktop. You should see a hammer icon (🔨) in the
-chat input area. Click it to see all 21 tools.
+chat input area. Click it to see all 23 tools.
 
 ---
 
