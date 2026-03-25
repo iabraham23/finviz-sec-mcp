@@ -45,27 +45,31 @@ def register_analyst_tools(server):
 
             lines = [
                 f"Analyst Ratings for {ticker.upper()}",
-                "=" * 60,
+                "=" * 75,
                 "",
-                f"{'Date':<12}{'Analyst':<22}{'Rating':<16}{'Target':>10}",
-                "-" * 60,
+                f"{'Date':<12}{'Action':<14}{'Analyst':<20}{'Rating':<16}{'Target':>13}",
+                "-" * 75,
             ]
 
             for t in targets:
                 date = t.get("date", "?")
-                analyst = t.get("analyst", "?")[:20]
+                category = t.get("category", "")[:12]
+                analyst = t.get("analyst", "?")[:18]
                 rating = t.get("rating", "?")[:14]
                 target_from = t.get("target_from", "")
                 target_to = t.get("target_to", "")
+                target_single = t.get("target", "")
                 if target_from and target_to:
                     target_str = f"${target_from}→${target_to}"
                 elif target_to:
                     target_str = f"${target_to}"
+                elif target_single:
+                    target_str = f"${target_single}"
                 else:
                     target_str = "-"
 
                 lines.append(
-                    f"{date:<12}{analyst:<22}{rating:<16}{target_str:>10}"
+                    f"{date:<12}{category:<14}{analyst:<20}{rating:<16}{target_str:>13}"
                 )
 
             return [TextContent(type="text", text="\n".join(lines))]

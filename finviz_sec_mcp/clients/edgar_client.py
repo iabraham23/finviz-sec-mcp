@@ -38,6 +38,9 @@ INSTANTANEOUS_CONCEPTS = {
     "LongTermDebt", "LongTermDebtNoncurrent",
     "LongTermDebtAndCapitalLeaseObligations",
     "CommonStockSharesOutstanding",
+    "Goodwill",
+    "IntangibleAssetsNetExcludingGoodwill", "IntangibleAssetsNet",
+    "FiniteLivedIntangibleAssetsNet",
 }
 
 # Maps user-friendly metric names to edgartools FactQuery concept patterns.
@@ -125,6 +128,16 @@ CONCEPT_ALIASES: Dict[str, List[str]] = {
         "PaymentsToAcquirePropertyPlantAndEquipment",
         "PaymentsToAcquireProductiveAssets",
         "CapitalExpenditureDiscontinuedOperations",
+    ],
+    "Goodwill": ["Goodwill"],
+    "IntangibleAssetsNetExcludingGoodwill": [
+        "IntangibleAssetsNetExcludingGoodwill",
+        "IntangibleAssetsNet",
+        "FiniteLivedIntangibleAssetsNet",
+    ],
+    "WeightedAverageNumberOfDilutedSharesOutstanding": [
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
     ],
 }
 
@@ -491,14 +504,26 @@ class EdgarClient:
 
         for candidate in concepts_to_try:
             try:
-                # Build query with form type filter applied via edgartools API
-                query = facts.query().by_concept(candidate)
+                # Use exact matching with us-gaap namespace to avoid
+                # substring collisions (e.g. "StockholdersEquity" matching
+                # "LiabilitiesAndStockholdersEquity").
+                query = facts.query().by_concept(
+                    f"us-gaap:{candidate}", exact=True
+                )
 
                 # Apply form type filter via edgartools if single form
                 if form_types and len(form_types) == 1:
                     query = query.by_form_type(form_types[0])
 
                 df = query.to_dataframe()
+
+                # Fallback to regex for non-US-GAAP filers (e.g. IFRS)
+                if (df is None or df.empty):
+                    query = facts.query().by_concept(candidate)
+                    if form_types and len(form_types) == 1:
+                        query = query.by_form_type(form_types[0])
+                    df = query.to_dataframe()
+
                 if df is None or df.empty:
                     continue
 
@@ -689,6 +714,188 @@ class EdgarClient:
             ],
             "concept_used": rows[0].get("concept_used", concept),
             "is_instantaneous": False,
+        }
+
+    # ── Per-share historical fundamentals ────────────────────────────────
+
+    def get_per_share_fundamentals(
+        self,
+        ticker: str,
+        periods: int = 10,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Compute historical per-share fundamentals from SEC XBRL data.
+
+        Returns annual series for:
+          - Diluted shares outstanding (weighted average)
+          - Book value per share (Equity / Diluted Shares)
+          - Tangible book value per share ((Equity - Goodwill - Intangibles) / Diluted Shares)
+          - Revenue per share
+          - Operating cash flow per share
+          - Diluted EPS
+          - Total revenue ($)
+          - Operating cash flow ($)
+
+        All values are from 10-K annual filings.
+        """
+        company = self._get_company(ticker)
+        if not company:
+            return None
+
+        # Fetch all needed metrics in annual (10-K) series.
+        # Over-fetch because 10-K XBRL includes quarterly comparison
+        # data that eats period slots; _by_year deduplicates to annual.
+        fetch_periods = periods * 4
+
+        def _fetch(concept: str, unit: str = "USD") -> List[Dict[str, Any]]:
+            return self.get_financial_metric(
+                ticker, concept, unit=unit,
+                periods=fetch_periods, form_types=["10-K"],
+            )
+
+        shares_data = _fetch("WeightedAverageNumberOfDilutedSharesOutstanding", unit="shares")
+        equity_data = _fetch("StockholdersEquity")
+        goodwill_data = _fetch("Goodwill")
+        intangibles_data = _fetch("IntangibleAssetsNetExcludingGoodwill")
+        revenue_data = _fetch("Revenues")
+        opcf_data = _fetch("NetCashProvidedByUsedInOperatingActivities")
+        eps_data = _fetch("EarningsPerShareDiluted", unit="USD/shares")
+
+        # For revenue and EPS, the ASC 606 transition (~2018) means the
+        # modern concept only has data from ~2019 forward.  Fetch the
+        # legacy concepts and merge so we get full 10-year coverage.
+        for legacy_concept in ["SalesRevenueNet", "SalesRevenueGoodsNet"]:
+            legacy = self.get_financial_metric(
+                ticker, legacy_concept, unit="USD",
+                periods=periods, form_types=["10-K"],
+            )
+            if legacy:
+                revenue_data = revenue_data + legacy
+                break  # one legacy source is enough
+
+        if not shares_data and not eps_data and not revenue_data:
+            return None
+
+        # Index each metric by fiscal year (period_end year).
+        # Data arrives sorted by period_end DESC.  For each year keep
+        # only the LARGEST value — this picks the annual total over any
+        # quarterly entries that leak through 10-K XBRL comparative data.
+        def _fiscal_year(end: str) -> int:
+            """Map period_end date to fiscal year.
+
+            Companies with 52/53-week fiscal calendars (e.g. JNJ, COST)
+            sometimes have period_end in early January (e.g. 2021-01-03
+            for FY2020).  If the date is in the first 10 days of January
+            we assign it to the prior calendar year.
+            """
+            year = int(end[:4])
+            month_day = end[5:10]  # "MM-DD"
+            if month_day <= "01-10":
+                year -= 1
+            return year
+
+        def _by_year(data: List[Dict]) -> Dict[int, float]:
+            result: Dict[int, float] = {}
+            for row in data:
+                end = row.get("end", "")
+                val = row.get("val")
+                if end and val is not None:
+                    year = _fiscal_year(end)
+                    if year not in result or abs(val) > abs(result[year]):
+                        result[year] = val
+            return result
+
+        shares_by_year = _by_year(shares_data)
+        equity_by_year = _by_year(equity_data)
+        goodwill_by_year = _by_year(goodwill_data)
+        intangibles_by_year = _by_year(intangibles_data)
+        revenue_by_year = _by_year(revenue_data)
+        opcf_by_year = _by_year(opcf_data)
+        eps_by_year = _by_year(eps_data)
+
+        # Collect all years that have at least shares or EPS
+        all_years = sorted(
+            set(shares_by_year) | set(eps_by_year) | set(revenue_by_year),
+            reverse=True,
+        )[:periods]
+
+        rows = []
+        for year in all_years:
+            shares = shares_by_year.get(year)
+            equity = equity_by_year.get(year)
+            goodwill = goodwill_by_year.get(year, 0)
+            intangibles = intangibles_by_year.get(year, 0)
+            revenue = revenue_by_year.get(year)
+            opcf = opcf_by_year.get(year)
+            eps = eps_by_year.get(year)
+
+            row: Dict[str, Any] = {"year": year}
+
+            # Diluted shares (millions)
+            if shares is not None:
+                row["diluted_shares"] = shares
+                row["diluted_shares_m"] = shares / 1_000_000
+            else:
+                row["diluted_shares"] = None
+                row["diluted_shares_m"] = None
+
+            # Book value per share
+            if equity is not None and shares:
+                row["book_value_per_share"] = equity / shares
+            else:
+                row["book_value_per_share"] = None
+
+            # Tangible book value per share
+            if equity is not None and shares:
+                tangible_equity = equity - (goodwill or 0) - (intangibles or 0)
+                row["tangible_bv_per_share"] = tangible_equity / shares
+            else:
+                row["tangible_bv_per_share"] = None
+
+            # Revenue per share
+            if revenue is not None and shares:
+                row["revenue_per_share"] = revenue / shares
+            else:
+                row["revenue_per_share"] = None
+
+            # Operating cash flow per share
+            if opcf is not None and shares:
+                row["opcf_per_share"] = opcf / shares
+            else:
+                row["opcf_per_share"] = None
+
+            # Diluted EPS (direct from filing)
+            row["eps_diluted"] = eps
+
+            # Absolute values
+            row["total_revenue"] = revenue
+            row["operating_cash_flow"] = opcf
+
+            rows.append(row)
+
+        # Track which concepts were actually used for transparency
+        concepts_used = {}
+        if shares_data:
+            concepts_used["diluted_shares"] = shares_data[0].get("concept_used", "")
+        if equity_data:
+            concepts_used["equity"] = equity_data[0].get("concept_used", "")
+        if goodwill_data:
+            concepts_used["goodwill"] = goodwill_data[0].get("concept_used", "")
+        if intangibles_data:
+            concepts_used["intangibles"] = intangibles_data[0].get("concept_used", "")
+        if revenue_data:
+            concepts_used["revenue"] = revenue_data[0].get("concept_used", "")
+        if opcf_data:
+            concepts_used["operating_cf"] = opcf_data[0].get("concept_used", "")
+        if eps_data:
+            concepts_used["eps_diluted"] = eps_data[0].get("concept_used", "")
+
+        return {
+            "ticker": ticker.upper(),
+            "entity_name": getattr(company, "name", ticker),
+            "periods": len(rows),
+            "rows": rows,
+            "concepts_used": concepts_used,
         }
 
     # ── Cross-company comparison ─────────────────────────────────────────
