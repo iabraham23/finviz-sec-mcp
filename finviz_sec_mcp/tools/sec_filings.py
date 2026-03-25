@@ -14,6 +14,8 @@ compare_financials     — Same metric across MULTIPLE companies for a given yea
                          Handles non-December fiscal year ends automatically.
 get_financial_snapshot  — Full income statement, balance sheet, and cash flow
                          from the latest filing. Best starting point for analysis.
+get_per_share_fundamentals — Historical BV/share, TBV/share, Rev/share, OCF/share,
+                         EPS, diluted shares. Replaces SimFin for valuation inputs.
 get_filing_text        — Full text of a specific filing (10-K MD&A, risk factors, etc.)
 get_sec_filings        — List of recent filings with EDGAR links.
 get_insider_filings    — Form 3/4/5 insider transaction filings with structured data.
@@ -260,6 +262,9 @@ def register_sec_tools(server):
                 "DepreciationDepletionAndAmortization" — D&A
                 "CapitalExpenditure" — Capital expenditures
                 "NetCashProvidedByUsedInOperatingActivities" — Operating cash flow
+                "Goodwill" — Goodwill (balance sheet)
+                "IntangibleAssetsNetExcludingGoodwill" — Intangible assets net of goodwill
+                "WeightedAverageNumberOfDilutedSharesOutstanding" — Diluted shares (unit "shares")
             periods: Number of recent periods to show (default 8).
             period_type: Controls which filings are included:
                 "annual"    — 10-K only. Clean year-over-year series.
@@ -273,7 +278,7 @@ def register_sec_tools(server):
             # Determine unit based on metric
             if "PerShare" in metric:
                 unit = "USD/shares"
-            elif "Shares" in metric:
+            elif "Shares" in metric or "ShareOutstanding" in metric:
                 unit = "shares"
             else:
                 unit = "USD"
@@ -459,7 +464,7 @@ def register_sec_tools(server):
             # Determine unit based on metric
             if "PerShare" in metric:
                 unit = "USD/shares"
-            elif "Shares" in metric:
+            elif "Shares" in metric or "ShareOutstanding" in metric:
                 unit = "shares"
             else:
                 unit = "USD"
@@ -591,7 +596,7 @@ def register_sec_tools(server):
             # Determine unit based on metric
             if "PerShare" in metric:
                 unit = "USD/shares"
-            elif "Shares" in metric:
+            elif "Shares" in metric or "ShareOutstanding" in metric:
                 unit = "shares"
             else:
                 unit = "USD"
@@ -734,4 +739,104 @@ def register_sec_tools(server):
 
         except Exception as e:
             logger.error(f"get_financial_snapshot error: {e}")
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    @server.tool()
+    def get_per_share_fundamentals(
+        ticker: str,
+        periods: int = 10,
+    ) -> List[TextContent]:
+        """Get historical per-share fundamentals from SEC XBRL filings.
+        Returns annual series of key valuation inputs computed from
+        actual reported values — replaces paid data services like SimFin.
+
+        Metrics returned per year:
+          - Diluted Shares Outstanding (weighted average, millions)
+          - Book Value per Share (Equity / Diluted Shares)
+          - Tangible Book Value per Share ((Equity - Goodwill - Intangibles) / Shares)
+          - Revenue per Share
+          - Operating Cash Flow per Share
+          - Diluted EPS (direct from filing)
+          - Total Revenue (millions)
+          - Operating Cash Flow (millions)
+
+        Args:
+            ticker: Stock ticker symbol.
+            periods: Number of annual periods (default 10, max ~10 years of data).
+        """
+        try:
+            data = edgar.get_per_share_fundamentals(ticker, periods=periods)
+
+            if not data:
+                return [TextContent(
+                    type="text",
+                    text=f"No per-share fundamentals found for {ticker.upper()}. "
+                         f"The company may not file in US-GAAP/XBRL format.",
+                )]
+
+            rows = data["rows"]
+            entity_name = data.get("entity_name", ticker.upper())
+            concepts = data.get("concepts_used", {})
+
+            lines = [
+                f"Per-Share Fundamentals: {ticker.upper()} — {entity_name}",
+                f"Source: SEC EDGAR XBRL (10-K annual filings)",
+                "=" * 100,
+            ]
+
+            # Show concept fallback notes if any
+            for field, concept in concepts.items():
+                if concept:
+                    lines.append(f"  {field}: {concept}")
+
+            lines.extend([
+                "",
+                f"{'Year':<6}"
+                f"{'Shares(M)':>11}"
+                f"{'BV/Shr':>10}"
+                f"{'TBV/Shr':>10}"
+                f"{'Rev/Shr':>10}"
+                f"{'OCF/Shr':>10}"
+                f"{'EPS':>10}"
+                f"{'Revenue(M)':>14}"
+                f"{'OpCF(M)':>14}",
+                "-" * 100,
+            ])
+
+            for r in rows:
+                def _fmt(val, fmt_str=",.2f"):
+                    if val is None:
+                        return "—"
+                    return f"{val:{fmt_str}}"
+
+                def _fmt_m(val):
+                    """Format as millions."""
+                    if val is None:
+                        return "—"
+                    return f"{val / 1_000_000:,.0f}"
+
+                lines.append(
+                    f"{r['year']:<6}"
+                    f"{_fmt(r.get('diluted_shares_m'), ',.1f'):>11}"
+                    f"{_fmt(r.get('book_value_per_share')):>10}"
+                    f"{_fmt(r.get('tangible_bv_per_share')):>10}"
+                    f"{_fmt(r.get('revenue_per_share')):>10}"
+                    f"{_fmt(r.get('opcf_per_share')):>10}"
+                    f"{_fmt(r.get('eps_diluted')):>10}"
+                    f"{_fmt_m(r.get('total_revenue')):>14}"
+                    f"{_fmt_m(r.get('operating_cash_flow')):>14}"
+                )
+
+            lines.extend([
+                "",
+                "Notes:",
+                "  BV/Shr = Stockholders' Equity / Weighted Avg Diluted Shares",
+                "  TBV/Shr = (Equity - Goodwill - Intangible Assets) / Diluted Shares",
+                "  All values from 10-K annual filings. Shares are weighted avg diluted.",
+            ])
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        except Exception as e:
+            logger.error(f"get_per_share_fundamentals error: {e}")
             return [TextContent(type="text", text=f"Error: {e}")]
