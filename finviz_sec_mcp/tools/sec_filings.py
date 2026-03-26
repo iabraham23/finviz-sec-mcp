@@ -756,7 +756,7 @@ def register_sec_tools(server):
           - Tangible Book Value per Share ((Equity - Goodwill - Intangibles) / Shares)
           - Revenue per Share
           - Operating Cash Flow per Share
-          - Diluted EPS (direct from filing)
+          - Diluted EPS (Net Income / Diluted Shares, split-adjusted)
           - Total Revenue (millions)
           - Operating Cash Flow (millions)
 
@@ -792,7 +792,7 @@ def register_sec_tools(server):
                     "StockholdersEquity", "Goodwill",
                     "IntangibleAssetsNetExcludingGoodwill", "Revenues",
                     "NetCashProvidedByUsedInOperatingActivities",
-                    "EarningsPerShareDiluted",
+                    "NetIncomeLoss",
                 )
             }
             if fallbacks:
@@ -837,13 +837,18 @@ def register_sec_tools(server):
                     f"{_fmt_m(r.get('operating_cash_flow')):>14}"
                 )
 
-            lines.extend([
+            notes = [
                 "",
                 "Notes:",
                 "  BV/Shr = Stockholders' Equity / Weighted Avg Diluted Shares",
                 "  TBV/Shr = (Equity - Goodwill - Intangible Assets) / Diluted Shares",
+                "  EPS = Net Income / Diluted Shares (split-adjusted)",
                 "  All values from 10-K annual filings. Shares are weighted avg diluted.",
-            ])
+            ]
+            if data.get("split_adjusted"):
+                yrs = data.get("split_adjusted_years", [])
+                notes.append(f"  Split-adjusted years: {', '.join(str(y) for y in yrs)}")
+            lines.extend(notes)
 
             return [TextContent(type="text", text="\n".join(lines))]
 
