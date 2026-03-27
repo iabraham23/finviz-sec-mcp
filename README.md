@@ -12,7 +12,7 @@ This is a request about how I would like collaboration to happen, not an additio
 
 ## What You Get
 
-**23 tools** accessible conversationally through any MCP client:
+**24 tools** accessible conversationally through any MCP client:
 
 | Tool | What it does |
 |------|-------------|
@@ -39,6 +39,7 @@ This is a request about how I would like collaboration to happen, not an additio
 | `get_stock_news` | Recent news headlines |
 | `get_earnings_news` | Earnings-related and transcript-related headlines |
 | `get_annual_price_history` | Annual high, low, and average close price history from Yahoo Finance |
+| `get_inputs_tab_data` | Consolidated extraction package for the valuation workbook INPUTS tab |
 
 ## Data Sources
 
@@ -151,7 +152,7 @@ echo "\"command\": \"$(pwd)/venv/bin/finviz-sec-mcp\""
 ### Step 6: Restart Claude Desktop
 
 Quit and reopen Claude Desktop. You should see a hammer icon (🔨) in the
-chat input area. Click it to see all 23 tools.
+chat input area. Click it to see all 24 tools.
 
 ---
 
