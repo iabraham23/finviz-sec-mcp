@@ -53,6 +53,9 @@ _BALANCE_SHEET_GROUPS = {
     "finance_lease_liability",
 }
 
+ANNUAL_FORM_TYPES = ("10-K", "20-F", "40-F")
+QUARTERLY_FORM_TYPES = ("10-Q",)
+
 
 def _is_instantaneous(concept: str) -> bool:
     """Check if an XBRL concept represents a point-in-time (balance sheet) item.
@@ -67,6 +70,19 @@ def _is_instantaneous(concept: str) -> bool:
     if info and info.group.category == "balance_sheet":
         return True
     return False
+
+
+def _form_filter_kind(form_types: Optional[List[str]]) -> str:
+    """Classify a form filter as annual, quarterly, or mixed."""
+    if not form_types:
+        return "mixed"
+
+    form_set = {form.upper() for form in form_types}
+    if form_set.issubset(set(ANNUAL_FORM_TYPES)):
+        return "annual"
+    if form_set.issubset(set(QUARTERLY_FORM_TYPES)):
+        return "quarterly"
+    return "mixed"
 
 # Maps our user-facing metric names to the edgartools standard_concept names
 # used in Financials API statement DataFrames.  The Financials API normalises
@@ -597,11 +613,15 @@ class EdgarClient:
             return []
 
         # Build allowed forms and fiscal-period filters
-        allowed_forms = set(form_types) if form_types else {"10-K", "10-Q"}
+        allowed_forms = (
+            {form.upper() for form in form_types}
+            if form_types else set(ANNUAL_FORM_TYPES) | set(QUARTERLY_FORM_TYPES)
+        )
 
-        if form_types and set(form_types) == {"10-K"}:
+        form_kind = _form_filter_kind(form_types)
+        if form_kind == "annual":
             allowed_fp = {"FY"}
-        elif form_types and set(form_types) == {"10-Q"}:
+        elif form_kind == "quarterly":
             allowed_fp = {"Q1", "Q2", "Q3", "Q4"}
         else:
             allowed_fp = None
@@ -685,13 +705,14 @@ class EdgarClient:
                             pe = pd.to_datetime(df["period_end"])
                             duration_days = (pe - ps).dt.days
 
-                            if allowed_fp and allowed_fp == {"FY"}:
+                            if form_kind == "annual":
                                 # Annual query: keep only full-year entries
-                                # (≥300 days).  10-K XBRL embeds quarterly
-                                # comparison data (~90 days) tagged FY.
+                                # (≥300 days). Annual filings can embed
+                                # quarterly comparison data (~90 days)
+                                # tagged FY.
                                 mask = ~is_duration | (duration_days >= 300)
                                 df = df[mask]
-                            elif allowed_fp and allowed_fp != {"FY"}:
+                            elif form_kind == "quarterly":
                                 # Quarterly query: keep only single-quarter
                                 # entries (≤100 days).  10-Q XBRL embeds
                                 # cumulative YTD data (180-270 days).
@@ -853,7 +874,8 @@ class EdgarClient:
         if is_instant:
             rows = self.get_financial_metric(
                 ticker, concept, taxonomy=taxonomy, unit=unit,
-                periods=1, form_types=["10-Q", "10-K"],
+                periods=1,
+                form_types=list(QUARTERLY_FORM_TYPES + ANNUAL_FORM_TYPES),
             )
             if not rows:
                 return None
@@ -868,13 +890,13 @@ class EdgarClient:
         # Income/CF: sum last 4 quarterly filings
         rows = self.get_financial_metric(
             ticker, concept, taxonomy=taxonomy, unit=unit,
-            periods=4, form_types=["10-Q"],
+            periods=4, form_types=list(QUARTERLY_FORM_TYPES),
         )
 
         # Always fetch the most recent annual — needed for multiple checks
         annual = self.get_financial_metric(
             ticker, concept, taxonomy=taxonomy, unit=unit,
-            periods=1, form_types=["10-K"],
+            periods=1, form_types=list(ANNUAL_FORM_TYPES),
         )
 
         if len(rows) < 4:
@@ -989,21 +1011,21 @@ class EdgarClient:
           - Total revenue ($)
           - Operating cash flow ($)
 
-        All values are from 10-K annual filings.
+        All values are from annual filings (10-K / 20-F / 40-F).
         """
         company = self._get_company(ticker)
         if not company:
             return None
 
-        # Fetch all needed metrics in annual (10-K) series.
-        # Over-fetch because 10-K XBRL includes quarterly comparison
+        # Fetch all needed metrics in annual filing series.
+        # Over-fetch because annual XBRL filings can include quarterly comparison
         # data that eats period slots; _by_year deduplicates to annual.
         fetch_periods = periods * 4
 
         def _fetch(concept: str, unit: str = "USD") -> List[Dict[str, Any]]:
             return self.get_financial_metric(
                 ticker, concept, unit=unit,
-                periods=fetch_periods, form_types=["10-K"],
+                periods=fetch_periods, form_types=list(ANNUAL_FORM_TYPES),
             )
 
         shares_data = _fetch("WeightedAverageNumberOfDilutedSharesOutstanding", unit="shares")
@@ -1020,7 +1042,7 @@ class EdgarClient:
         for legacy_concept in ["SalesRevenueNet", "SalesRevenueGoodsNet"]:
             legacy = self.get_financial_metric(
                 ticker, legacy_concept, unit="USD",
-                periods=periods, form_types=["10-K"],
+                periods=periods, form_types=list(ANNUAL_FORM_TYPES),
             )
             if legacy:
                 revenue_data = revenue_data + legacy
@@ -1223,9 +1245,9 @@ class EdgarClient:
 
             # Determine form types and periods to look for
             if quarter:
-                form_filter = ["10-Q"]
+                form_filter = list(QUARTERLY_FORM_TYPES)
             else:
-                form_filter = ["10-K"]
+                form_filter = list(ANNUAL_FORM_TYPES)
 
             rows = self.get_financial_metric(
                 ticker, concept,
