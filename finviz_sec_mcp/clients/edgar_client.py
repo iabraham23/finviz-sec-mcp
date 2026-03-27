@@ -73,6 +73,10 @@ MANUAL_CONCEPT_ALIASES: Dict[str, List[str]] = {
         "WeightedAverageNumberOfOrdinarySharesBasic",
         "WeightedAverageNumberOfSharesBasic",
     ],
+    "NetCashProvidedByUsedInOperatingActivities": [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "CashFlowsFromUsedInOperatingActivities",
+    ],
 }
 
 
@@ -333,126 +337,102 @@ class EdgarClient:
 
         return concepts
 
-    def _get_weighted_share_facts_from_filings(
+    def _discover_weighted_share_concept_from_latest_annual_filing(
         self,
         ticker: str,
-        periods: int = 10,
-    ) -> List[Dict[str, Any]]:
-        """Extract annual weighted-average share counts directly from filing XBRL facts.
+    ) -> Optional[str]:
+        """Discover the exact weighted-share concept from the latest annual filing XBRL.
 
-        This is a fallback for foreign private issuers where the share
-        denominator is present in filing facts but not exposed cleanly
-        through the companyfacts/company.get_financials paths.
+        This is a lightweight fallback for foreign private issuers where
+        companyfacts does not expose the share denominator under the
+        expected concept name. Once discovered, the concept is cached and
+        the normal companyfacts query path can fetch the full history.
         """
         company = self._get_company(ticker)
         if not company:
-            return []
+            return None
 
         try:
-            filings = company.get_filings(form=list(ANNUAL_FORM_TYPES))
+            form_arg = list(ANNUAL_FORM_TYPES)
+            filings = company.get_filings(form=form_arg)
         except Exception as e:
             logger.error(f"Failed to get annual filings for {ticker}: {e}")
-            return []
+            return None
 
-        candidates: List[Dict[str, Any]] = []
-        filings_checked = 0
-        max_filings = max(periods, 4)
+        try:
+            filing = next(iter(filings), None)
+        except Exception:
+            filing = None
+        if not filing:
+            return None
 
-        for filing in filings:
-            if filings_checked >= max_filings:
-                break
-            filings_checked += 1
+        try:
+            xbrl = filing.xbrl()
+            if not xbrl:
+                return None
 
-            try:
-                xbrl = filing.xbrl()
-                if not xbrl:
+            df = xbrl.facts.query().by_concept("WeightedAverage").to_dataframe()
+            if df is None or df.empty:
+                return None
+
+            best_concept = None
+            best_score = None
+
+            for _, row in df.iterrows():
+                concept = str(row.get("concept", "") or "")
+                label = str(row.get("label", "") or "")
+                numeric = row.get("numeric_value")
+                period_end = row.get("period_end")
+                period_start = row.get("period_start")
+                period_type = str(row.get("period_type", "") or "")
+                unit_ref = str(row.get("unit_ref", "") or "")
+
+                if numeric is None or period_end is None:
+                    continue
+                if period_type != "duration":
+                    continue
+                if unit_ref.lower() != "shares":
                     continue
 
-                df = xbrl.facts.query().by_concept("WeightedAverage").to_dataframe()
-                if df is None or df.empty:
+                haystack = f"{concept} {label}".lower()
+                if "share" not in haystack:
+                    continue
+                if "exercise price" in haystack or "option" in haystack:
+                    continue
+                if "weightedaverage" not in haystack and "weighted average" not in haystack:
                     continue
 
-                for _, row in df.iterrows():
-                    concept = str(row.get("concept", "") or "")
-                    label = str(row.get("label", "") or "")
-                    numeric = row.get("numeric_value")
-                    period_end = row.get("period_end")
-                    period_start = row.get("period_start")
-                    period_type = str(row.get("period_type", "") or "")
-                    unit_ref = str(row.get("unit_ref", "") or "")
+                if period_start is not None:
+                    try:
+                        duration_days = (
+                            date.fromisoformat(str(period_end))
+                            - date.fromisoformat(str(period_start))
+                        ).days
+                        if duration_days < 300:
+                            continue
+                    except Exception:
+                        pass
 
-                    if numeric is None or period_end is None:
-                        continue
-                    if period_type != "duration":
-                        continue
-                    if unit_ref.lower() != "shares":
-                        continue
+                score = 0
+                if "diluted" in haystack or "adjustedweightedaverageshares" in haystack:
+                    score += 2
+                if "basic" in haystack:
+                    score += 1
 
-                    haystack = f"{concept} {label}".lower()
-                    if "share" not in haystack:
-                        continue
-                    if "exercise price" in haystack or "option" in haystack:
-                        continue
-                    if "weightedaverage" not in haystack and "weighted average" not in haystack:
-                        continue
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_concept = concept
 
-                    if period_start is not None:
-                        try:
-                            duration_days = (date.fromisoformat(str(period_end))
-                                             - date.fromisoformat(str(period_start))).days
-                            if duration_days < 300:
-                                continue
-                        except Exception:
-                            pass
-
-                    score = 0
-                    if "diluted" in haystack or "adjustedweightedaverageshares" in haystack:
-                        score += 2
-                    if "basic" in haystack:
-                        score += 1
-
-                    candidates.append({
-                        "end": str(period_end),
-                        "val": float(numeric),
-                        "form": getattr(filing, "form", ""),
-                        "fy": int(str(period_end)[:4]),
-                        "fp": "FY",
-                        "filed": str(getattr(filing, "filing_date", "")),
-                        "concept_used": _strip_concept_namespace(concept),
-                        "_score": score,
-                    })
-            except Exception as e:
-                logger.debug(f"Failed to inspect filing XBRL share facts for {ticker}: {e}")
-
-        if not candidates:
-            return []
-
-        best_by_year: Dict[int, Dict[str, Any]] = {}
-        for row in candidates:
-            year = int(row["end"][:4])
-            current = best_by_year.get(year)
-            if current is None:
-                best_by_year[year] = row
-                continue
-
-            current_key = (current.get("_score", 0), current.get("filed", ""))
-            candidate_key = (row.get("_score", 0), row.get("filed", ""))
-            if candidate_key > current_key:
-                best_by_year[year] = row
-
-        results = []
-        for year in sorted(best_by_year.keys(), reverse=True)[:periods]:
-            row = dict(best_by_year[year])
-            row.pop("_score", None)
-            results.append(row)
-
-        if results:
-            logger.info(
-                f"{ticker}: using filing XBRL share facts concept "
-                f"'{results[0].get('concept_used', '')}'"
-            )
-
-        return results
+            if best_concept:
+                self._concept_cache[(ticker.upper(), "WeightedAverageNumberOfDilutedSharesOutstanding")] = best_concept
+                logger.info(
+                    f"{ticker}: discovered weighted-share concept from latest annual filing: "
+                    f"{best_concept}"
+                )
+            return best_concept
+        except Exception as e:
+            logger.debug(f"Failed to inspect latest annual filing XBRL share concept for {ticker}: {e}")
+            return None
 
     # ── Filing list ──────────────────────────────────────────────────────
 
@@ -800,11 +780,14 @@ class EdgarClient:
 
         for candidate in concepts_to_try:
             try:
+                exact_candidate = (
+                    candidate if ":" in candidate else f"us-gaap:{candidate}"
+                )
                 # Use exact matching with us-gaap namespace to avoid
                 # substring collisions (e.g. "StockholdersEquity" matching
                 # "LiabilitiesAndStockholdersEquity").
                 query = facts.query().by_concept(
-                    f"us-gaap:{candidate}", exact=True
+                    exact_candidate, exact=True
                 )
 
                 # Apply form type filter via edgartools if single form
@@ -912,8 +895,11 @@ class EdgarClient:
                 if candidate == best_candidate:
                     continue
                 try:
+                    exact_candidate = (
+                        candidate if ":" in candidate else f"us-gaap:{candidate}"
+                    )
                     query = facts.query().by_concept(
-                        f"us-gaap:{candidate}", exact=True
+                        exact_candidate, exact=True
                     )
                     if form_types and len(form_types) == 1:
                         query = query.by_form_type(form_types[0])
@@ -1186,9 +1172,11 @@ class EdgarClient:
         shares_metric = "WeightedAverageNumberOfDilutedSharesOutstanding"
         shares_data = _fetch(shares_metric, unit="shares")
         if not shares_data:
-            shares_data = self._get_weighted_share_facts_from_filings(
-                ticker, periods=fetch_periods
+            discovered_share_concept = (
+                self._discover_weighted_share_concept_from_latest_annual_filing(ticker)
             )
+            if discovered_share_concept:
+                shares_data = _fetch(shares_metric, unit="shares")
         equity_data = _fetch("StockholdersEquity")
         goodwill_data = _fetch("Goodwill")
         intangibles_data = _fetch("IntangibleAssetsNetExcludingGoodwill")
