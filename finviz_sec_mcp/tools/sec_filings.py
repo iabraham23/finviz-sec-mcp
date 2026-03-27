@@ -794,7 +794,7 @@ def register_sec_tools(server):
                 return [TextContent(
                     type="text",
                     text=f"No per-share fundamentals found for {ticker.upper()}. "
-                         f"The company may not file in US-GAAP/XBRL format.",
+                         f"The company may not have usable annual XBRL filings.",
                 )]
 
             rows = data["rows"]
@@ -803,7 +803,7 @@ def register_sec_tools(server):
 
             lines = [
                 f"Per-Share Fundamentals: {ticker.upper()} — {entity_name}",
-                f"Source: SEC EDGAR XBRL (10-K annual filings)",
+                f"Source: SEC EDGAR XBRL (annual filings: 10-K / 20-F / 40-F)",
                 "=" * 95,
             ]
 
@@ -866,7 +866,7 @@ def register_sec_tools(server):
                 "  BV/Shr = Stockholders' Equity / Weighted Avg Diluted Shares",
                 "  TBV/Shr = (Equity - Goodwill - Intangible Assets) / Diluted Shares",
                 "  EPS = Net Income / Diluted Shares (split-adjusted)",
-                "  All values from 10-K annual filings. Shares are weighted avg diluted.",
+                "  All values from annual filings (10-K / 20-F / 40-F). Shares are weighted avg diluted.",
             ]
             if data.get("split_adjusted"):
                 yrs = data.get("split_adjusted_years", [])
