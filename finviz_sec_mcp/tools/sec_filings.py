@@ -696,6 +696,29 @@ def register_sec_tools(server):
                     if val is not None:
                         lines.append(f"  {label:<25} {_format_usd(val, 'USD'):>18}")
 
+                # Liquidity & leverage ratios
+                cr = qm.get("current_ratio")
+                dta = qm.get("debt_to_assets")
+                ca = qm.get("current_assets")
+                cl = qm.get("current_liabilities")
+                sh_b = qm.get("shares_outstanding_basic")
+                sh_d = qm.get("shares_outstanding_diluted")
+
+                if any(v is not None for v in [cr, dta, ca, cl]):
+                    lines.extend(["", "── Ratios & Shares ──"])
+                    if ca is not None:
+                        lines.append(f"  {'Current Assets':<25} {_format_usd(ca, 'USD'):>18}")
+                    if cl is not None:
+                        lines.append(f"  {'Current Liabilities':<25} {_format_usd(cl, 'USD'):>18}")
+                    if cr is not None:
+                        lines.append(f"  {'Current Ratio':<25} {cr:>18.2f}")
+                    if dta is not None:
+                        lines.append(f"  {'Debt / Assets':<25} {dta:>18.2%}")
+                    if sh_b is not None:
+                        lines.append(f"  {'Shares Basic':<25} {_format_usd(sh_b, 'shares'):>18}")
+                    if sh_d is not None:
+                        lines.append(f"  {'Shares Diluted':<25} {_format_usd(sh_d, 'shares'):>18}")
+
             # Detailed statements
             for stmt_key, stmt_title in [
                 ("income_statement", "INCOME STATEMENT"),

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from edgar import Company, set_identity
+from edgar.standardization import get_synonym_groups # type: ignore
 
 load_dotenv()
 
@@ -29,19 +30,43 @@ set_identity(_sec_email)
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-# Balance-sheet concepts are point-in-time; everything else is duration.
-INSTANTANEOUS_CONCEPTS = {
-    "Assets", "Liabilities", "StockholdersEquity",
-    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
-    "CashAndCashEquivalentsAtCarryingValue",
-    "CashCashEquivalentsAndShortTermInvestments", "Cash",
-    "LongTermDebt", "LongTermDebtNoncurrent",
-    "LongTermDebtAndCapitalLeaseObligations",
-    "CommonStockSharesOutstanding",
-    "Goodwill",
-    "IntangibleAssetsNetExcludingGoodwill", "IntangibleAssetsNet",
-    "FiniteLivedIntangibleAssetsNet",
+# Singleton SynonymGroups instance — 59 curated synonym groups covering
+# all common financial concepts.  Used as the fallback alias source
+# instead of a hand-maintained dict.
+_synonym_groups = get_synonym_groups()
+
+# Balance-sheet synonym group names — concepts in these groups are
+# point-in-time (instantaneous) rather than period-based.
+_BALANCE_SHEET_GROUPS = {
+    "total_assets", "total_liabilities", "stockholders_equity",
+    "cash_and_equivalents", "long_term_debt", "short_term_debt",
+    "common_shares_outstanding", "goodwill", "intangible_assets",
+    "accounts_receivable", "inventory", "prepaid_expenses",
+    "total_current_assets", "property_plant_equipment",
+    "long_term_investments", "short_term_investments",
+    "deferred_tax_assets", "accounts_payable", "accrued_liabilities",
+    "deferred_revenue", "total_current_liabilities",
+    "deferred_tax_liabilities", "common_stock",
+    "additional_paid_in_capital", "retained_earnings", "treasury_stock",
+    "accumulated_other_comprehensive_income",
+    "operating_lease_liability", "operating_lease_right_of_use_asset",
+    "finance_lease_liability",
 }
+
+
+def _is_instantaneous(concept: str) -> bool:
+    """Check if an XBRL concept represents a point-in-time (balance sheet) item.
+
+    Uses the edgartools SynonymGroups system to identify the concept's
+    financial statement category, falling back to a name-based heuristic.
+    """
+    info = _synonym_groups.identify_concept(concept)
+    if info and info.group.name in _BALANCE_SHEET_GROUPS:
+        return True
+    # Heuristic fallback for concepts not in synonym groups
+    if info and info.group.category == "balance_sheet":
+        return True
+    return False
 
 # Maps our user-facing metric names to the edgartools standard_concept names
 # used in Financials API statement DataFrames.  The Financials API normalises
@@ -77,102 +102,63 @@ METRIC_TO_STANDARD: Dict[str, tuple] = {
     "PaymentsOfDividends":                          ("DistributionsToMinorityInterests", "CF"),
 }
 
-# Fallback alias chains — only used when the Financials API discovery fails
-# (e.g. company has no recent 10-K, or uses a non-standard taxonomy).
-CONCEPT_ALIASES: Dict[str, List[str]] = {
-    "Revenues": [
-        "Revenues",
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
-        "RevenueFromContractWithCustomerIncludingAssessedTax",
-        "SalesRevenueNet",
-        "SalesRevenueGoodsNet",
-        "SalesRevenueServicesNet",
-    ],
-    "NetIncomeLoss": [
-        "NetIncomeLoss",
-        "NetIncomeLossAvailableToCommonStockholdersBasic",
-        "ProfitLoss",
-    ],
-    "OperatingIncomeLoss": [
-        "OperatingIncomeLoss",
-        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
-    ],
-    "GrossProfit": ["GrossProfit"],
-    "SellingGeneralAndAdministrativeExpense": [
-        "SellingGeneralAndAdministrativeExpense",
-        "GeneralAndAdministrativeExpense",
-        "SellingAndMarketingExpense",
-        "SellingExpense",
-    ],
-    "ResearchAndDevelopmentExpense": [
-        "ResearchAndDevelopmentExpense",
-        "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
-    ],
-    "InterestExpense": [
-        "InterestExpense",
-        "InterestExpenseDebt",
-        "InterestAndDebtExpense",
-        "InterestCostsIncurred",
-    ],
-    "IncomeTaxExpenseBenefit": [
-        "IncomeTaxExpenseBenefit",
-        "IncomeTaxesPaidNet",
-    ],
-    "EarningsPerShareBasic": ["EarningsPerShareBasic"],
-    "EarningsPerShareDiluted": ["EarningsPerShareDiluted"],
-    "LongTermDebt": [
-        "LongTermDebt",
-        "LongTermDebtNoncurrent",
-        "LongTermDebtAndCapitalLeaseObligations",
-    ],
-    "CashAndCashEquivalentsAtCarryingValue": [
-        "CashAndCashEquivalentsAtCarryingValue",
-        "CashCashEquivalentsAndShortTermInvestments",
-        "Cash",
-    ],
-    "StockholdersEquity": [
-        "StockholdersEquity",
-        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
-    ],
-    "NetCashProvidedByUsedInOperatingActivities": [
-        "NetCashProvidedByOperatingActivities",
-        "NetCashProvidedByUsedInOperatingActivities",
-    ],
-    "NetCashProvidedByUsedInFinancingActivities": [
-        "NetCashProvidedByUsedInFinancingActivities",
-        "NetCashProvidedByFinancingActivities",
-    ],
-    "NetCashProvidedByUsedInInvestingActivities": [
-        "NetCashProvidedByUsedInInvestingActivities",
-        "NetCashProvidedByInvestingActivities",
-    ],
-    "PaymentsOfDividends": [
-        "PaymentsOfDividends",
-        "PaymentsOfDividendsCommonStock",
-        "DividendsCommonStockCash",
-        "PaymentsOfOrdinaryDividends",
-    ],
-    "DepreciationDepletionAndAmortization": [
-        "DepreciationDepletionAndAmortization",
-        "DepreciationAndAmortization",
-        "Depreciation",
-    ],
-    "CapitalExpenditure": [
-        "PaymentsToAcquirePropertyPlantAndEquipment",
-        "PaymentsToAcquireProductiveAssets",
-        "CapitalExpenditureDiscontinuedOperations",
-    ],
-    "Goodwill": ["Goodwill"],
-    "IntangibleAssetsNetExcludingGoodwill": [
-        "IntangibleAssetsNetExcludingGoodwill",
-        "IntangibleAssetsNet",
-        "FiniteLivedIntangibleAssetsNet",
-    ],
-    "WeightedAverageNumberOfDilutedSharesOutstanding": [
-        "WeightedAverageNumberOfDilutedSharesOutstanding",
-        "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
-    ],
+# Maps user-facing metric names → edgartools synonym group names.
+# The SynonymGroups system provides curated alias lists for each group,
+# so we no longer need to maintain our own CONCEPT_ALIASES dict.
+# Entries with None mean the concept isn't in a synonym group and must
+# rely on Financials API discovery or the raw concept name.
+METRIC_TO_SYNONYM_GROUP: Dict[str, Optional[str]] = {
+    "Revenues":                                         "revenue",
+    "NetIncomeLoss":                                    "net_income",
+    "OperatingIncomeLoss":                              "operating_income",
+    "GrossProfit":                                      "gross_profit",
+    "SellingGeneralAndAdministrativeExpense":            "sga_expense",
+    "ResearchAndDevelopmentExpense":                     "research_and_development",
+    "InterestExpense":                                  "interest_expense",
+    "IncomeTaxExpenseBenefit":                           "income_tax_expense",
+    "EarningsPerShareBasic":                            "earnings_per_share_basic",
+    "EarningsPerShareDiluted":                          "earnings_per_share_diluted",
+    "LongTermDebt":                                     "long_term_debt",
+    "CashAndCashEquivalentsAtCarryingValue":            "cash_and_equivalents",
+    "StockholdersEquity":                               "stockholders_equity",
+    "NetCashProvidedByUsedInOperatingActivities":       "operating_cash_flow",
+    "NetCashProvidedByUsedInFinancingActivities":       "financing_cash_flow",
+    "NetCashProvidedByUsedInInvestingActivities":       "investing_cash_flow",
+    "PaymentsOfDividends":                              "dividends_paid",
+    "DepreciationDepletionAndAmortization":             "depreciation_and_amortization",
+    "CapitalExpenditure":                               "capex",
+    "Goodwill":                                         "goodwill",
+    "IntangibleAssetsNetExcludingGoodwill":             "intangible_assets",
+    "Assets":                                           "total_assets",
+    "Liabilities":                                      "total_liabilities",
+    "CommonStockSharesOutstanding":                     "common_shares_outstanding",
+    # These two aren't in a synonym group — rely on discovery + raw name
+    "WeightedAverageNumberOfDilutedSharesOutstanding":  None,
 }
+
+
+def _get_synonym_aliases(concept: str) -> List[str]:
+    """Get fallback alias list for a concept from edgartools SynonymGroups.
+
+    Returns the synonym group's full alias list if the concept maps to a
+    known group, otherwise tries reverse lookup (identify the concept by
+    its XBRL tag name), and falls back to just [concept] if nothing found.
+    """
+    # 1. Direct mapping from our metric name → group name
+    group_name = METRIC_TO_SYNONYM_GROUP.get(concept)
+    if group_name:
+        try:
+            return _synonym_groups.get_synonyms(group_name)
+        except Exception:
+            pass
+
+    # 2. Reverse lookup — maybe the concept itself is a known XBRL tag
+    info = _synonym_groups.identify_concept(concept)
+    if info:
+        return info.group.synonyms
+
+    # 3. No synonym group found — return just the raw concept
+    return [concept]
 
 
 class EdgarClient:
@@ -270,7 +256,7 @@ class EdgarClient:
 
         Priority:
         1. Dynamically discovered concept from the company's latest 10-K
-        2. Fallback alias chain from CONCEPT_ALIASES
+        2. Fallback aliases from edgartools SynonymGroups (59 curated groups)
         3. The raw concept name itself
         """
         ticker_upper = ticker.upper()
@@ -286,8 +272,8 @@ class EdgarClient:
             if concept in discovered:
                 concepts.append(discovered[concept])
 
-        # 2. Add fallback aliases (excluding any already in the list)
-        for alias in CONCEPT_ALIASES.get(concept, [concept]):
+        # 2. Add fallback aliases from edgartools SynonymGroups
+        for alias in _get_synonym_aliases(concept):
             if alias not in concepts:
                 concepts.append(alias)
 
@@ -682,20 +668,35 @@ class EdgarClient:
                     acceptable_units = unit_map.get(unit, [unit])
                     df = df[df["unit"].isin(acceptable_units)]
 
-                # For quarterly data (10-Q), filter out year-to-date
-                # cumulative figures.  10-Q filings contain BOTH single-
-                # quarter values (≤100 day duration) AND cumulative YTD
-                # values (6-9 month spans).  We only want single quarters.
-                if (allowed_fp and allowed_fp != {"FY"}
-                        and "period_start" in df.columns
-                        and "period_end" in df.columns):
+                # Duration-based filtering for period (non-instant) concepts.
+                # 10-K XBRL includes quarterly comparison data alongside
+                # annual totals, and 10-Q XBRL includes year-to-date
+                # cumulative figures alongside single quarters.  Filter by
+                # duration to get clean series.
+                if ("period_start" in df.columns
+                        and "period_end" in df.columns
+                        and "period_type" in df.columns):
                     try:
                         import pandas as pd
-                        ps = pd.to_datetime(df["period_start"])
-                        pe = pd.to_datetime(df["period_end"])
-                        duration_days = (pe - ps).dt.days
-                        # Single quarter ≈ 90 days; allow up to 100
-                        df = df[duration_days <= 100]
+                        # Only apply duration filter to non-instant concepts
+                        is_duration = df["period_type"] == "duration"
+                        if is_duration.any():
+                            ps = pd.to_datetime(df["period_start"])
+                            pe = pd.to_datetime(df["period_end"])
+                            duration_days = (pe - ps).dt.days
+
+                            if allowed_fp and allowed_fp == {"FY"}:
+                                # Annual query: keep only full-year entries
+                                # (≥300 days).  10-K XBRL embeds quarterly
+                                # comparison data (~90 days) tagged FY.
+                                mask = ~is_duration | (duration_days >= 300)
+                                df = df[mask]
+                            elif allowed_fp and allowed_fp != {"FY"}:
+                                # Quarterly query: keep only single-quarter
+                                # entries (≤100 days).  10-Q XBRL embeds
+                                # cumulative YTD data (180-270 days).
+                                mask = ~is_duration | (duration_days <= 100)
+                                df = df[mask]
                     except Exception:
                         pass  # fall through if date parsing fails
 
@@ -755,6 +756,25 @@ class EdgarClient:
                         }
                         acceptable_units = unit_map.get(unit, [unit])
                         alt_df = alt_df[alt_df["unit"].isin(acceptable_units)]
+                    if alt_df.empty:
+                        continue
+                    # Apply duration filter (same as main loop)
+                    if ("period_start" in alt_df.columns
+                            and "period_end" in alt_df.columns
+                            and "period_type" in alt_df.columns):
+                        try:
+                            import pandas as pd
+                            is_dur = alt_df["period_type"] == "duration"
+                            if is_dur.any():
+                                ps = pd.to_datetime(alt_df["period_start"])
+                                pe = pd.to_datetime(alt_df["period_end"])
+                                dur = (pe - ps).dt.days
+                                if allowed_fp and allowed_fp == {"FY"}:
+                                    alt_df = alt_df[~is_dur | (dur >= 300)]
+                                elif allowed_fp and allowed_fp != {"FY"}:
+                                    alt_df = alt_df[~is_dur | (dur <= 100)]
+                        except Exception:
+                            pass
                     if alt_df.empty:
                         continue
                     # Only keep rows for period_ends NOT already covered
@@ -828,7 +848,7 @@ class EdgarClient:
         or cash flow concept by summing four most recent quarterly filings.
         For balance sheet items, returns the most recent quarterly value.
         """
-        is_instant = concept in INSTANTANEOUS_CONCEPTS
+        is_instant = _is_instantaneous(concept)
 
         if is_instant:
             rows = self.get_financial_metric(
@@ -1310,18 +1330,58 @@ class EdgarClient:
                     logger.warning(f"Could not get {stmt_name} for {ticker}: {e}")
                     result[stmt_name] = None
 
-            # Also grab quick metrics
+            # Grab quick metrics — use get_financial_metrics() for the
+            # full set, then patch any Nones with CF DataFrame fallback.
             try:
+                base = financials.get_financial_metrics()
+
+                # edgartools' get_operating_cash_flow() returns None for
+                # some companies (e.g. AAPL) when the CF label doesn't
+                # match its expected pattern.  Fall back to reading the
+                # CF DataFrame for the standard_concept we know works.
+                ocf = base.get("operating_cash_flow")
+                capex = base.get("capital_expenditures")
+                fcf = base.get("free_cash_flow")
+
+                if ocf is None or fcf is None:
+                    cf_stmt = result.get("cashflow_statement")
+                    if cf_stmt:
+                        cf_rows = cf_stmt.get("rows", [])
+                        cf_periods = cf_stmt.get("periods", [])
+                        latest_period = cf_periods[0] if cf_periods else None
+                        if latest_period:
+                            for r in cf_rows:
+                                concept = r.get("concept", "")
+                                std = r.get("standard_concept", "")
+                                if (ocf is None
+                                        and "NetCashProvidedByUsedInOperatingActivities"
+                                        in concept
+                                        and "Abstract" not in concept):
+                                    val = r.get(latest_period)
+                                    if val is not None and not (isinstance(val, float) and val != val):
+                                        ocf = val
+                                        break
+
+                    if ocf is not None and fcf is None and capex is not None:
+                        fcf = ocf - abs(capex)
+
                 result["quick_metrics"] = {
-                    "revenue": financials.get_revenue(),
-                    "net_income": financials.get_net_income(),
-                    "operating_income": financials.get_operating_income(),
-                    "total_assets": financials.get_total_assets(),
-                    "total_liabilities": financials.get_total_liabilities(),
-                    "stockholders_equity": financials.get_stockholders_equity(),
-                    "operating_cash_flow": financials.get_operating_cash_flow(),
-                    "free_cash_flow": financials.get_free_cash_flow(),
-                    "capital_expenditures": financials.get_capital_expenditures(),
+                    "revenue": base.get("revenue"),
+                    "net_income": base.get("net_income"),
+                    "operating_income": base.get("operating_income"),
+                    "total_assets": base.get("total_assets"),
+                    "total_liabilities": base.get("total_liabilities"),
+                    "stockholders_equity": base.get("stockholders_equity"),
+                    "operating_cash_flow": ocf,
+                    "free_cash_flow": fcf,
+                    "capital_expenditures": capex,
+                    # New metrics from get_financial_metrics()
+                    "current_assets": base.get("current_assets"),
+                    "current_liabilities": base.get("current_liabilities"),
+                    "current_ratio": base.get("current_ratio"),
+                    "debt_to_assets": base.get("debt_to_assets"),
+                    "shares_outstanding_basic": base.get("shares_outstanding_basic"),
+                    "shares_outstanding_diluted": base.get("shares_outstanding_diluted"),
                 }
             except Exception as e:
                 logger.warning(f"Could not get quick metrics for {ticker}: {e}")
@@ -1343,58 +1403,76 @@ class EdgarClient:
         """
         Get insider trading filings (Form 3/4/5) with structured data
         parsed from the XBRL-tagged filing via edgartools' Form4 objects.
+
+        Fetches all insider form types and interleaves them by filing date
+        (newest first) so Form 3 and Form 5 filings aren't crowded out by
+        the typically larger volume of Form 4 filings.
         """
         company = self._get_company(ticker)
         if not company:
             return []
 
-        results = []
+        # Collect raw filings from all insider form types, interleaved
+        # by date.  Fetch a generous window then sort + trim.
+        raw_filings = []
         try:
-            for form_type in ["4", "3", "5"]:
-                try:
-                    filings = company.get_filings(form=form_type)
-                except Exception:
-                    continue
-
+            try:
+                filings = company.get_filings(form=["3", "4", "5"])
                 for f in filings:
-                    if len(results) >= max_results:
+                    raw_filings.append(f)
+                    if len(raw_filings) >= max_results * 2:
                         break
-
-                    entry = {
-                        "form": f.form,
-                        "date": str(f.filing_date),
-                        "url": f.homepage_url or "",
-                    }
-
-                    # Try to parse the filing as a typed object
+            except Exception:
+                # Fallback: fetch each type individually
+                for form_type in ["4", "3", "5"]:
                     try:
-                        obj = f.obj()
-                        if hasattr(obj, "insider_name"):
-                            entry["insider_name"] = obj.insider_name or ""
-                        if hasattr(obj, "position"):
-                            entry["position"] = obj.position or ""
-                        if hasattr(obj, "shares_traded"):
-                            entry["shares_traded"] = obj.shares_traded
-
-                        # Get ownership summary if available
-                        if hasattr(obj, "get_ownership_summary"):
-                            try:
-                                summary = obj.get_ownership_summary()
-                                entry["activity"] = summary.primary_activity
-                                entry["net_change"] = summary.net_change
-                                entry["net_value"] = summary.net_value
-                                entry["remaining_shares"] = summary.remaining_shares
-                            except Exception:
-                                pass
+                        filings = company.get_filings(form=form_type)
+                        for f in filings:
+                            raw_filings.append(f)
+                            if len(raw_filings) >= max_results * 2:
+                                break
                     except Exception:
-                        pass
-
-                    results.append(entry)
-
-                if len(results) >= max_results:
-                    break
-
+                        continue
         except Exception as e:
             logger.error(f"Failed to get insider filings for {ticker}: {e}")
+            return []
+
+        # Sort by filing date descending
+        raw_filings.sort(
+            key=lambda f: str(getattr(f, "filing_date", "")), reverse=True
+        )
+
+        results = []
+        for f in raw_filings[:max_results]:
+            entry = {
+                "form": f.form,
+                "date": str(f.filing_date),
+                "url": f.homepage_url or "",
+            }
+
+            # Try to parse the filing as a typed object
+            try:
+                obj = f.obj()
+                if hasattr(obj, "insider_name"):
+                    entry["insider_name"] = obj.insider_name or ""
+                if hasattr(obj, "position"):
+                    entry["position"] = obj.position or ""
+                if hasattr(obj, "shares_traded"):
+                    entry["shares_traded"] = obj.shares_traded
+
+                # Get ownership summary if available
+                if hasattr(obj, "get_ownership_summary"):
+                    try:
+                        summary = obj.get_ownership_summary()
+                        entry["activity"] = summary.primary_activity
+                        entry["net_change"] = summary.net_change
+                        entry["net_value"] = summary.net_value
+                        entry["remaining_shares"] = summary.remaining_shares
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            results.append(entry)
 
         return results
