@@ -167,6 +167,7 @@ def _build_payload(
                 _parse_suffix_number(fundamentals.get("Avg Volume")), 0
             ),
             "high_52_week": _round_or_none(_parse_price_field(fundamentals.get("52W High"))),
+            "low_52_week": _round_or_none(_parse_price_field(fundamentals.get("52W Low"))),
             "analyst_price_estimate_1y": _round_or_none(
                 _parse_float(fundamentals.get("Target Price"))
             ),
@@ -233,6 +234,7 @@ def _format_report(payload: Dict[str, Any]) -> str:
         f"  Market Cap ($M): {_format_intish(ident['market_cap_millions'])}",
         f"  Avg Daily Volume (3M): {_format_intish(ident['avg_daily_volume_3m'])}",
         f"  52-Week High: ${_format_num(ident['high_52_week'])}",
+        f"  52-Week Low: ${_format_num(ident['low_52_week'])}",
         f"  1Y Analyst Price Estimate: ${_format_num(ident['analyst_price_estimate_1y'])}",
         "",
         "Section 2 — Earnings & Growth Assumptions",
