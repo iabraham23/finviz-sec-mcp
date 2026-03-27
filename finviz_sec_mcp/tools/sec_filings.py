@@ -821,6 +821,8 @@ def register_sec_tools(server):
             if fallbacks:
                 notes = ", ".join(f"{k}={v}" for k, v in fallbacks.items())
                 lines.append(f"Concept fallbacks: {notes}")
+            if concepts.get("shares_note"):
+                lines.append(f"Share fallback: {concepts['shares_note']}")
 
             lines.extend([
                 "",

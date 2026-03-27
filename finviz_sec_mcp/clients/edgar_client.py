@@ -56,6 +56,25 @@ _BALANCE_SHEET_GROUPS = {
 ANNUAL_FORM_TYPES = ("10-K", "20-F", "40-F")
 QUARTERLY_FORM_TYPES = ("10-Q",)
 
+# Manual concept aliases for metrics that frequently differ across
+# IFRS/private-issuer filings and are not covered well by SynonymGroups.
+MANUAL_CONCEPT_ALIASES: Dict[str, List[str]] = {
+    "WeightedAverageNumberOfDilutedSharesOutstanding": [
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
+        "WeightedAverageNumberOfSharesOutstandingBasicAndDiluted",
+        "WeightedAverageNumberOfOrdinarySharesOutstandingBasicAndDiluted",
+        "WeightedAverageNumberOfOrdinarySharesOutstandingDiluted",
+        "WeightedAverageNumberOfSharesOutstandingDiluted",
+        # Basic weighted-average share concepts are a usable fallback when
+        # diluted shares are not tagged separately in 20-F IFRS filings.
+        "WeightedAverageNumberOfOrdinarySharesOutstanding",
+        "WeightedAverageNumberOfSharesOutstanding",
+        "WeightedAverageNumberOfOrdinarySharesBasic",
+        "WeightedAverageNumberOfSharesBasic",
+    ],
+}
+
 
 def _is_instantaneous(concept: str) -> bool:
     """Check if an XBRL concept represents a point-in-time (balance sheet) item.
@@ -83,6 +102,11 @@ def _form_filter_kind(form_types: Optional[List[str]]) -> str:
     if form_set.issubset(set(QUARTERLY_FORM_TYPES)):
         return "quarterly"
     return "mixed"
+
+
+def _get_manual_aliases(concept: str) -> List[str]:
+    """Return curated fallback aliases for concepts with known IFRS variants."""
+    return MANUAL_CONCEPT_ALIASES.get(concept, [])
 
 # Maps our user-facing metric names to the edgartools standard_concept names
 # used in Financials API statement DataFrames.  The Financials API normalises
@@ -288,12 +312,17 @@ class EdgarClient:
             if concept in discovered:
                 concepts.append(discovered[concept])
 
-        # 2. Add fallback aliases from edgartools SynonymGroups
+        # 2. Add curated aliases for concepts with common IFRS variants.
+        for alias in _get_manual_aliases(concept):
+            if alias not in concepts:
+                concepts.append(alias)
+
+        # 3. Add fallback aliases from edgartools SynonymGroups
         for alias in _get_synonym_aliases(concept):
             if alias not in concepts:
                 concepts.append(alias)
 
-        # 3. Ensure the raw concept name is always tried
+        # 4. Ensure the raw concept name is always tried
         if concept not in concepts:
             concepts.append(concept)
 
@@ -1028,7 +1057,8 @@ class EdgarClient:
                 periods=fetch_periods, form_types=list(ANNUAL_FORM_TYPES),
             )
 
-        shares_data = _fetch("WeightedAverageNumberOfDilutedSharesOutstanding", unit="shares")
+        shares_metric = "WeightedAverageNumberOfDilutedSharesOutstanding"
+        shares_data = _fetch(shares_metric, unit="shares")
         equity_data = _fetch("StockholdersEquity")
         goodwill_data = _fetch("Goodwill")
         intangibles_data = _fetch("IntangibleAssetsNetExcludingGoodwill")
@@ -1190,7 +1220,14 @@ class EdgarClient:
         # Track which concepts were actually used for transparency
         concepts_used = {}
         if shares_data:
-            concepts_used["diluted_shares"] = shares_data[0].get("concept_used", "")
+            shares_concept = shares_data[0].get("concept_used", "")
+            concepts_used["diluted_shares"] = shares_concept
+            if shares_concept and shares_concept != shares_metric:
+                lower_concept = shares_concept.lower()
+                if "basic" in lower_concept and "diluted" not in lower_concept:
+                    concepts_used["shares_note"] = (
+                        "Used basic weighted-average shares because no diluted share concept was available."
+                    )
         if equity_data:
             concepts_used["equity"] = equity_data[0].get("concept_used", "")
         if goodwill_data:
