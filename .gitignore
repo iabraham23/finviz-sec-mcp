@@ -25,3 +25,5 @@ build/
 
 # Internal Documents
 IMPROVEMENT_PLAN.md
+INPUTS_EXTRACTION_SPEC.md
+INPUTS_TOOL_MAPPING.md

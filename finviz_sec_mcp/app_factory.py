@@ -12,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .tools.analyst import register_analyst_tools
 from .tools.fundamentals import register_fundamentals_tools
+from .tools.inputs_tab import register_inputs_tab_tools
 from .tools.price_history import register_price_history_tools
 from .tools.screener import register_screener_tools
 from .tools.sec_filings import register_sec_tools
@@ -34,6 +35,7 @@ def register_all_tools(server: FastMCP) -> FastMCP:
     register_sector_tools(server)
     register_analyst_tools(server)
     register_price_history_tools(server)
+    register_inputs_tab_tools(server)
     return server
 
 def build_server(mode: Literal["local", "remote"] = "local") -> FastMCP:
