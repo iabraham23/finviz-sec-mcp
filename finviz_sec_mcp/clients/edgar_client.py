@@ -1172,11 +1172,23 @@ class EdgarClient:
         shares_metric = "WeightedAverageNumberOfDilutedSharesOutstanding"
         shares_data = _fetch(shares_metric, unit="shares")
         if not shares_data:
+            logger.info(
+                f"{ticker}: no share series from companyfacts for "
+                f"{shares_metric}; trying latest annual filing concept discovery"
+            )
             discovered_share_concept = (
                 self._discover_weighted_share_concept_from_latest_annual_filing(ticker)
             )
             if discovered_share_concept:
+                logger.info(
+                    f"{ticker}: retrying companyfacts share query with discovered concept "
+                    f"{discovered_share_concept}"
+                )
                 shares_data = _fetch(shares_metric, unit="shares")
+            else:
+                logger.info(
+                    f"{ticker}: latest annual filing concept discovery found no share concept"
+                )
         equity_data = _fetch("StockholdersEquity")
         goodwill_data = _fetch("Goodwill")
         intangibles_data = _fetch("IntangibleAssetsNetExcludingGoodwill")
