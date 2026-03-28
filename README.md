@@ -41,7 +41,7 @@ This is a request about how I would like collaboration to happen, not an additio
 | `get_stock_news` | Recent news headlines |
 | `get_earnings_news` | Earnings-related and transcript-related headlines |
 | `get_annual_price_history` | Annual high, low, and average close price history from Yahoo Finance |
-| `get_inputs_tab_data` | Consolidated extraction package for the valuation workbook INPUTS tab |
+| `get_inputs_tab_data` | Consolidated extraction package for CWC specific valuation workbook |
 
 ## Data Sources
 
