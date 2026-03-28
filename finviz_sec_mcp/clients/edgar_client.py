@@ -500,8 +500,9 @@ class EdgarClient:
     ) -> Optional[Dict[str, str]]:
         """
         Fetch the most recent filing of a given type and return clean text.
-        Uses edgartools' built-in text extraction which properly handles
-        iXBRL markup without manual BeautifulSoup parsing.
+        Prefers edgartools' markdown extraction for HTML/iXBRL filings,
+        which is materially better for 20-F narrative content than the
+        raw plaintext fallback.
 
         Args:
             ticker: Stock ticker symbol.
@@ -517,8 +518,7 @@ class EdgarClient:
             if not filing:
                 return None
 
-            # edgartools .text() returns clean plaintext with XBRL stripped
-            text = filing.text()
+            text = self._get_filing_markdown_or_text(filing)
             if not text:
                 return None
 
@@ -542,6 +542,43 @@ class EdgarClient:
         except Exception as e:
             logger.error(f"Failed to fetch filing text for {ticker}: {e}")
             return None
+
+    def _get_filing_markdown_or_text(self, filing: Any) -> Optional[str]:
+        """Get the cleanest narrative text available for a filing.
+
+        Preference order:
+        1. Primary HTML attachment rendered as markdown
+        2. Filing-level markdown rendering
+        3. Filing plaintext
+        """
+        try:
+            attachments = getattr(filing, "attachments", None)
+            primary_html = getattr(attachments, "primary_html_document", None)
+            if primary_html is not None:
+                try:
+                    markdown = primary_html.markdown()
+                    if markdown:
+                        return str(markdown)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            markdown = filing.markdown()
+            if markdown:
+                return str(markdown)
+        except Exception:
+            pass
+
+        try:
+            text = filing.text()
+            if text:
+                return str(text)
+        except Exception:
+            pass
+
+        return None
 
     # Section patterns for finding where content starts in 10-K/10-Q
     _SECTION_PATTERNS = [
@@ -598,6 +635,29 @@ class EdgarClient:
         "9a": "Item 9A",
     }
 
+    _SECTION_20F_ALIASES: Dict[str, str] = {
+        "risk_factors": "Item 3.D",
+        "risk": "Item 3.D",
+        "3d": "Item 3.D",
+        "business": "Item 4",
+        "4": "Item 4",
+        "mda": "Item 5",
+        "operating_financial_review": "Item 5",
+        "operating_and_financial_review": "Item 5",
+        "5": "Item 5",
+        "financial_statements": "Item 18",
+        "17": "Item 17",
+        "18": "Item 18",
+    }
+
+    _SECTION_20F_LABELS: Dict[str, str] = {
+        "Item 3.D": "Risk Factors",
+        "Item 4": "Information on the Company",
+        "Item 5": "Operating and Financial Review and Prospects",
+        "Item 17": "Financial Statements",
+        "Item 18": "Financial Statements",
+    }
+
     @classmethod
     def _resolve_section(cls, name: str) -> str:
         """Normalise a user-supplied section name to canonical 'Item X' form."""
@@ -609,6 +669,122 @@ class EdgarClient:
         if m:
             return f"Item {m.group(1).upper()}"
         return name  # pass through unchanged
+
+    @classmethod
+    def _resolve_20f_section(cls, name: str) -> str:
+        """Normalise a user-supplied 20-F section to canonical item form."""
+        key = name.strip().lower()
+        if key in cls._SECTION_20F_ALIASES:
+            return cls._SECTION_20F_ALIASES[key]
+        m = re.match(r"^item\s+(.+)$", key)
+        if m:
+            return f"Item {m.group(1).upper()}"
+        return name
+
+    def _extract_item_section_from_markdown(
+        self, text: str, canonical_item: str, max_chars: int
+    ) -> Optional[str]:
+        """Extract a filing item or item subsection from markdown text."""
+        section_text = self._extract_item_block_from_markdown(text, canonical_item)
+        if not section_text:
+            return None
+
+        truncated = len(section_text) > max_chars
+        section_text = section_text[:max_chars]
+        if truncated:
+            section_text += (
+                f"\n[Truncated to {max_chars:,} chars — pass a larger "
+                f"max_chars_per_section for more]"
+            )
+        return section_text
+
+    def _extract_item_block_from_markdown(
+        self, text: str, canonical_item: str
+    ) -> Optional[str]:
+        """Extract an untruncated filing item or item subsection."""
+        if not text:
+            return None
+
+        subsection_match = re.match(r"^Item\s+(\d+)\.([A-Z])$", canonical_item, re.I)
+        if subsection_match:
+            parent_item = f"Item {subsection_match.group(1)}"
+            subsection_letter = subsection_match.group(2).upper()
+            parent_text = self._extract_item_block_from_markdown(text, parent_item)
+            if not parent_text:
+                return None
+            subsection_text = self._extract_lettered_subsection_from_markdown(
+                parent_text, subsection_letter
+            )
+            return subsection_text or parent_text
+
+        item_suffix = canonical_item.replace("Item ", "").strip()
+        escaped_suffix = re.escape(item_suffix)
+        # Match headings like:
+        #   Item 5.
+        #   ITEM 3.D
+        #   ## Item 18 Financial Statements
+        start_pattern = re.compile(
+            rf"(?im)^(?:\s*#+\s*)?item\s+{escaped_suffix}(?:[\.\s:,-].*)?$"
+        )
+        next_item_pattern = re.compile(
+            r"(?im)^(?:\s*#+\s*)?item\s+\d+[a-z]?(?:\.\d+|(?:\.[a-z]))?(?:[\.\s:,-].*)?$"
+        )
+
+        start_matches = list(start_pattern.finditer(text))
+        if not start_matches:
+            return None
+
+        best_section = ""
+        for start_match in start_matches:
+            start = start_match.start()
+            remainder = text[start_match.end():]
+            end_match = next_item_pattern.search(remainder)
+            end = start + end_match.start() if end_match else len(text)
+            candidate = text[start:end].strip()
+            if len(candidate) > len(best_section):
+                best_section = candidate
+
+        section_text = best_section.strip()
+        return section_text or None
+
+    @staticmethod
+    def _extract_lettered_subsection_from_markdown(
+        text: str, subsection_letter: str
+    ) -> Optional[str]:
+        """Extract a lettered subsection like D. within a 20-F item block."""
+        start_pattern = re.compile(
+            rf"(?im)^(?:\s*#+\s*)?{re.escape(subsection_letter)}\.\s*(?:.*)?$"
+        )
+        next_subsection_pattern = re.compile(
+            r"(?im)^(?:\s*#+\s*)?[A-Z]\.\s*(?:.*)?$"
+        )
+        next_item_pattern = re.compile(
+            r"(?im)^(?:\s*#+\s*)?item\s+\d+[a-z]?(?:\.\d+|(?:\.[a-z]))?(?:[\.\s:,-].*)?$"
+        )
+
+        start_matches = list(start_pattern.finditer(text))
+        if not start_matches:
+            return None
+
+        best_section = ""
+        for start_match in start_matches:
+            start = start_match.start()
+            remainder = text[start_match.end():]
+            subsection_end_match = next_subsection_pattern.search(remainder)
+            item_end_match = next_item_pattern.search(remainder)
+
+            candidate_endings = []
+            if subsection_end_match:
+                candidate_endings.append(start + subsection_end_match.start())
+            if item_end_match:
+                candidate_endings.append(start + item_end_match.start())
+            end = min(candidate_endings) if candidate_endings else len(text)
+
+            candidate = text[start:end].strip()
+            if len(candidate) > len(best_section):
+                best_section = candidate
+
+        return best_section or None
 
     def get_filing_sections(
         self,
@@ -650,6 +826,8 @@ class EdgarClient:
             filing = company.latest(form_type)
             if not filing:
                 return None
+
+            actual_form = str(getattr(filing, "form", form_type)).upper()
 
             # Only attempt structured section access for 10-K / 10-Q
             if form_type in ("10-K", "10-Q"):
@@ -699,6 +877,32 @@ class EdgarClient:
                         f"Could not build structured object for {ticker} "
                         f"{form_type}, falling back to text: {e}"
                     )
+
+            # 20-F path: use markdown extraction from the primary filing HTML
+            # and slice by item headings instead of falling back to raw text.
+            if actual_form == "20-F":
+                markdown_text = self._get_filing_markdown_or_text(filing)
+                if markdown_text:
+                    extracted: Dict[str, str] = {}
+                    resolved_20f = {
+                        s: self._resolve_20f_section(s) for s in sections
+                    }
+                    for orig_name, canonical in resolved_20f.items():
+                        section_text = self._extract_item_section_from_markdown(
+                            markdown_text, canonical, max_chars_per_section
+                        )
+                        if section_text:
+                            extracted[orig_name] = section_text
+
+                    if extracted:
+                        return {
+                            "form": filing.form,
+                            "date": str(filing.filing_date),
+                            "url": filing.homepage_url or "",
+                            "sections": extracted,
+                            "available_items": sorted(self._SECTION_20F_LABELS.keys()),
+                            "method": "markdown_sections",
+                        }
 
             # Fallback: raw text — cap at a reasonable limit regardless of
             # how many sections were requested to avoid huge EDGAR downloads.
