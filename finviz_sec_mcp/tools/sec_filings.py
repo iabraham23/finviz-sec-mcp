@@ -123,13 +123,18 @@ def register_sec_tools(server):
         For 10-K and 10-Q filings, uses edgartools' structured TenK/TenQ
         objects to pull named items directly — no iXBRL overhead, no
         wasted character budget on table-of-contents boilerplate.
+        For 20-F filings, uses edgartools markdown extraction from the
+        primary filing HTML and slices by 20-F item headings.
         For other form types (8-K, etc.), falls back to full-text extraction.
 
         Args:
             ticker: Stock ticker symbol.
             form_type: Form to fetch — "10-K", "10-Q", "8-K", etc.
-            sections: Comma-separated list of items to retrieve (10-K/10-Q only).
-                Default "Item 7,Item 1A" returns MD&A + Risk Factors.
+            sections: Comma-separated list of items to retrieve.
+                Default "Item 7,Item 1A" returns MD&A + Risk Factors for
+                10-K / 10-Q. For 20-F, useful sections include:
+                "Item 3.D", "Item 4", "Item 5", "Item 18", plus aliases
+                like "risk_factors", "business", "mda", "financial_statements".
                 Supported formats:
                   Full:     "Item 1", "Item 1A", "Item 7", "Item 7A", "Item 8"
                   Short:    "1", "1A", "7", "7A"
@@ -179,8 +184,20 @@ def register_sec_tools(server):
                 "Item 3":  "Quantitative and Qualitative Disclosures",
                 "Item 4":  "Controls and Procedures",
             }
+            _20F_LABELS = {
+                "Item 3.D": "Risk Factors",
+                "Item 4": "Information on the Company",
+                "Item 5": "Operating and Financial Review and Prospects",
+                "Item 17": "Financial Statements",
+                "Item 18": "Financial Statements",
+            }
             filing_form = result.get("form", form_type)
-            _SECTION_LABELS = _10Q_LABELS if "10-Q" in filing_form else _10K_LABELS
+            if "10-Q" in filing_form:
+                _SECTION_LABELS = _10Q_LABELS
+            elif "20-F" in filing_form:
+                _SECTION_LABELS = _20F_LABELS
+            else:
+                _SECTION_LABELS = _10K_LABELS
 
             method = result.get("method", "structured")
             lines = [
@@ -192,7 +209,7 @@ def register_sec_tools(server):
             extracted = result.get("sections", {})
             available = result.get("available_items", [])
 
-            if method == "structured":
+            if method in {"structured", "markdown_sections"}:
                 lines.append(
                     f"Sections: {', '.join(extracted.keys()) or 'none found'}"
                 )
@@ -267,7 +284,8 @@ def register_sec_tools(server):
                 "WeightedAverageNumberOfDilutedSharesOutstanding" — Diluted shares (unit "shares")
             periods: Number of recent periods to show (default 8).
             period_type: Controls which filings are included:
-                "annual"    — 10-K only. Clean year-over-year series.
+                "annual"    — Annual filings (10-K / 20-F / 40-F).
+                              Clean year-over-year series.
                               RECOMMENDED for financial modeling.
                 "quarterly" — 10-Q only. Clean quarter-over-quarter series,
                               useful for recent trend analysis.
@@ -285,7 +303,7 @@ def register_sec_tools(server):
 
             # Map period_type to form_types filter
             form_map = {
-                "annual":    ["10-K"],
+                "annual":    ["10-K", "20-F", "40-F"],
                 "quarterly": ["10-Q"],
                 "all":       None,   # None → both
             }
@@ -308,7 +326,7 @@ def register_sec_tools(server):
                     text=f"No XBRL data found for {ticker.upper()} — {metric} "
                          f"({period_type} filings).\n"
                          f"Try a different metric name or check that the company "
-                         f"files in US-GAAP format.{alt_hint}",
+                         f"files XBRL-tagged annual/quarterly reports.{alt_hint}",
                 )]
 
             # Check if a fallback concept was used
@@ -320,7 +338,7 @@ def register_sec_tools(server):
                 )
 
             period_label = {
-                "annual": "Annual (10-K)",
+                "annual": "Annual (10-K / 20-F / 40-F)",
                 "quarterly": "Quarterly (10-Q)",
                 "all": "Annual + Quarterly",
             }.get(period_type, period_type)
