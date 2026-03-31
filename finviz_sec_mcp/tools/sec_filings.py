@@ -289,8 +289,11 @@ def register_sec_tools(server):
                               RECOMMENDED for financial modeling.
                 "quarterly" — 10-Q only. Clean quarter-over-quarter series,
                               useful for recent trend analysis.
-                "all"       — Both 10-K and 10-Q mixed (legacy behaviour,
-                              not recommended for modeling).
+                "interim"   — Interim filings (10-Q / 6-K). Includes
+                              foreign private issuer interim XBRL when present.
+                              May include both ~3-month and ~6-month periods.
+                "all"       — Annual + interim filings mixed
+                              (not recommended for modeling).
         """
         try:
             # Determine unit based on metric
@@ -305,6 +308,7 @@ def register_sec_tools(server):
             form_map = {
                 "annual":    ["10-K", "20-F", "40-F"],
                 "quarterly": ["10-Q"],
+                "interim":   ["10-Q", "6-K"],
                 "all":       None,   # None → both
             }
             form_types = form_map.get(period_type, ["10-K"])
@@ -318,8 +322,8 @@ def register_sec_tools(server):
                 alt_hint = ""
                 if period_type != "all":
                     alt_hint = (
-                        f"\nTip: Try period_type='all' to search both "
-                        f"annual and quarterly filings."
+                        f"\nTip: Try period_type='interim' or period_type='all' "
+                        f"to search 10-Q and 6-K filings as well."
                     )
                 return [TextContent(
                     type="text",
@@ -340,7 +344,8 @@ def register_sec_tools(server):
             period_label = {
                 "annual": "Annual (10-K / 20-F / 40-F)",
                 "quarterly": "Quarterly (10-Q)",
-                "all": "Annual + Quarterly",
+                "interim": "Interim (10-Q / 6-K)",
+                "all": "Annual + Interim",
             }.get(period_type, period_type)
 
             lines = [

@@ -55,6 +55,7 @@ _BALANCE_SHEET_GROUPS = {
 
 ANNUAL_FORM_TYPES = ("10-K", "20-F", "40-F")
 QUARTERLY_FORM_TYPES = ("10-Q",)
+INTERIM_FORM_TYPES = ("10-Q", "6-K")
 
 # Manual concept aliases for metrics that frequently differ across
 # IFRS/private-issuer filings and are not covered well by SynonymGroups.
@@ -96,7 +97,7 @@ def _is_instantaneous(concept: str) -> bool:
 
 
 def _form_filter_kind(form_types: Optional[List[str]]) -> str:
-    """Classify a form filter as annual, quarterly, or mixed."""
+    """Classify a form filter as annual, quarterly, interim, or mixed."""
     if not form_types:
         return "mixed"
 
@@ -105,6 +106,8 @@ def _form_filter_kind(form_types: Optional[List[str]]) -> str:
         return "annual"
     if form_set.issubset(set(QUARTERLY_FORM_TYPES)):
         return "quarterly"
+    if form_set.issubset(set(INTERIM_FORM_TYPES)):
+        return "interim"
     return "mixed"
 
 
@@ -954,7 +957,7 @@ class EdgarClient:
         # Build allowed forms and fiscal-period filters
         allowed_forms = (
             {form.upper() for form in form_types}
-            if form_types else set(ANNUAL_FORM_TYPES) | set(QUARTERLY_FORM_TYPES)
+            if form_types else set(ANNUAL_FORM_TYPES) | set(INTERIM_FORM_TYPES)
         )
 
         form_kind = _form_filter_kind(form_types)
@@ -962,6 +965,8 @@ class EdgarClient:
             allowed_fp = {"FY"}
         elif form_kind == "quarterly":
             allowed_fp = {"Q1", "Q2", "Q3", "Q4"}
+        elif form_kind == "interim":
+            allowed_fp = None
         else:
             allowed_fp = None
 
@@ -1060,6 +1065,14 @@ class EdgarClient:
                                 # cumulative YTD data (180-270 days).
                                 mask = ~is_duration | (duration_days <= 100)
                                 df = df[mask]
+                            elif form_kind == "interim":
+                                # Interim queries may include both true
+                                # quarterlies (~90 days) and half-year
+                                # 6-K statements (~180 days).
+                                mask = ~is_duration | (
+                                    (duration_days >= 80) & (duration_days <= 200)
+                                )
+                                df = df[mask]
                     except Exception:
                         pass  # fall through if date parsing fails
 
@@ -1137,8 +1150,12 @@ class EdgarClient:
                                 dur = (pe - ps).dt.days
                                 if allowed_fp and allowed_fp == {"FY"}:
                                     alt_df = alt_df[~is_dur | (dur >= 300)]
-                                elif allowed_fp and allowed_fp != {"FY"}:
+                                elif form_kind == "quarterly":
                                     alt_df = alt_df[~is_dur | (dur <= 100)]
+                                elif form_kind == "interim":
+                                    alt_df = alt_df[
+                                        ~is_dur | ((dur >= 80) & (dur <= 200))
+                                    ]
                         except Exception:
                             pass
                     if alt_df.empty:
