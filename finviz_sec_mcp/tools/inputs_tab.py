@@ -104,6 +104,12 @@ def _format_num(value: Optional[float], digits: int = 2) -> str:
     return f"{value:,.{digits}f}"
 
 
+def _format_pct(value: Optional[float], digits: int = 2) -> str:
+    if value is None:
+        return "—"
+    return f"{value:,.{digits}f}%"
+
+
 def _format_intish(value: Optional[float]) -> str:
     if value is None:
         return "—"
@@ -240,7 +246,7 @@ def _format_report(payload: Dict[str, Any]) -> str:
         "Section 2 — Earnings & Growth Assumptions",
         f"  Current EPS (EPS ttm): {_format_num(growth['current_eps'])}",
         f"  Forward EPS (EPS next Y): {_format_num(growth['forward_eps_next_year'])}",
-        f"  5Y EPS Growth: {_format_num(growth['eps_growth_5y'])}",
+        f"  5Y EPS Growth: {_format_pct(growth['eps_growth_5y'])}",
         f"  Company PEG: {_format_num(growth['company_peg'])}",
         f"  Industry PEG: {_format_num(growth['industry_peg'])}",
         f"  Forward P/E: {_format_num(growth['forward_pe_consensus'])}",
@@ -283,11 +289,6 @@ def _format_report(payload: Dict[str, Any]) -> str:
         "",
         "Manual / Unresolved Fields",
         "  Date of Analysis, Date of Valuation, Model Year, DCF values, CWC analyst price target, and Section 3 valuation weightings remain manual.",
-        "",
-        "JSON Payload",
-        "```json",
-        json.dumps(payload, indent=2, sort_keys=True),
-        "```",
     ])
 
     return "\n".join(lines)
@@ -302,6 +303,7 @@ def register_inputs_tab_tools(server) -> None:
         price_years: int = 11,
         fundamentals_years: int = 10,
         peg_basis: str = "industry",
+        include_json: bool = False,
     ) -> List[TextContent]:
         """Get a structured extraction package for the valuation workbook INPUTS tab.
 
@@ -318,6 +320,8 @@ def register_inputs_tab_tools(server) -> None:
         - Forward EPS uses Finviz `EPS next Y`
         - PEG basis defaults to industry
         - LTM EPS Diluted uses SEC TTM diluted EPS
+        - JSON payload is omitted by default for readability; pass
+          `include_json=True` to append the raw structured payload
 
         Args:
             ticker: Stock ticker symbol.
@@ -354,6 +358,10 @@ def register_inputs_tab_tools(server) -> None:
                 ttm_eps=ttm_eps,
             )
             report = _format_report(payload)
+            if include_json:
+                report += "\n\nJSON Payload\n```json\n"
+                report += json.dumps(payload, indent=2, sort_keys=True)
+                report += "\n```"
             return [TextContent(type="text", text=report)]
 
         except Exception as e:

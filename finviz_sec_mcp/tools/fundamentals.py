@@ -3,7 +3,8 @@ Individual Stock Fundamentals Tools
 """
 
 import logging
-from typing import List
+import re
+from typing import List, Optional, Tuple
 from mcp.types import TextContent
 
 from ..clients.finviz_client import FinvizClient
@@ -38,6 +39,16 @@ TECHNICAL_FIELDS = [
 ]
 
 
+def _parse_price_with_percent(raw: str) -> Tuple[Optional[str], Optional[str]]:
+    """Split composite Finviz fields like '258.60 -7.82%'."""
+    if not raw or raw == "-":
+        return None, None
+    match = re.match(r"^\s*([0-9.,]+)\s*([+-]?[0-9.]+%)?\s*$", str(raw))
+    if not match:
+        return str(raw), None
+    return match.group(1), match.group(2)
+
+
 def _format_stock_section(data: dict, title: str, fields: list) -> List[str]:
     """Format a section of stock data."""
     lines = [f"  {title}:"]
@@ -49,6 +60,58 @@ def _format_stock_section(data: dict, title: str, fields: list) -> List[str]:
     for i in range(0, len(parts), 3):
         chunk = parts[i : i + 3]
         lines.append(f"    {' | '.join(chunk)}")
+    return lines
+
+
+def _format_technical_section(data: dict) -> List[str]:
+    """Format current-market fields in a less dense, agent-friendly layout."""
+    lines = ["  Price & Technical:"]
+
+    price = data.get("Price", "-")
+    change = data.get("Change", "-")
+    lines.append(f"    Price: {price} | Change: {change}")
+
+    volume = data.get("Volume", "-")
+    avg_volume = data.get("Avg Volume", "-")
+    rel_volume = data.get("Rel Volume", "-")
+    lines.append(
+        f"    Volume: {volume} | Avg Volume: {avg_volume} | Rel Volume: {rel_volume}"
+    )
+
+    high_price, high_delta = _parse_price_with_percent(data.get("52W High", "-"))
+    low_price, low_delta = _parse_price_with_percent(data.get("52W Low", "-"))
+    range_bits = []
+    if low_price:
+        range_bits.append(f"52W Low: {low_price}")
+    if high_price:
+        range_bits.append(f"52W High: {high_price}")
+    if range_bits:
+        lines.append(f"    {' | '.join(range_bits)}")
+
+    delta_bits = []
+    if high_delta:
+        delta_bits.append(f"From 52W High: {high_delta}")
+    if low_delta:
+        delta_bits.append(f"From 52W Low: {low_delta}")
+    if delta_bits:
+        lines.append(f"    {' | '.join(delta_bits)}")
+
+    sma_bits = []
+    for field in ["SMA20", "SMA50", "SMA200"]:
+        val = data.get(field, "-")
+        if val and val != "-":
+            sma_bits.append(f"{field}: {val}")
+    if sma_bits:
+        lines.append(f"    {' | '.join(sma_bits)}")
+
+    extra_bits = []
+    for field in ["Beta", "RSI (14)", "ATR"]:
+        val = data.get(field, "-")
+        if val and val != "-":
+            extra_bits.append(f"{field}: {val}")
+    if extra_bits:
+        lines.append(f"    {' | '.join(extra_bits)}")
+
     return lines
 
 
@@ -93,7 +156,7 @@ def register_fundamentals_tools(server):
             lines.append("")
             lines.extend(_format_stock_section(data, "Ownership & Short Interest", OWNERSHIP_FIELDS))
             lines.append("")
-            lines.extend(_format_stock_section(data, "Price & Technical", TECHNICAL_FIELDS))
+            lines.extend(_format_technical_section(data))
 
             # Include target price and analyst rec
             target = data.get("Target Price", "-")

@@ -25,6 +25,7 @@ get_stock_fundamentals, compare_stocks, get_analyst_ratings, get_insider_activit
 """
 
 import logging
+import math
 from datetime import date
 from typing import List
 from mcp.types import TextContent
@@ -39,6 +40,8 @@ def _format_usd(val: float, unit: str) -> str:
     """Format a numeric value with appropriate unit suffix."""
     if val is None:
         return "N/A"
+    if isinstance(val, float) and math.isnan(val):
+        return "—"
     if unit == "USD" and abs(val) >= 1_000_000_000:
         return f"${val / 1_000_000_000:,.2f}B"
     if unit == "USD" and abs(val) >= 1_000_000:
@@ -46,10 +49,128 @@ def _format_usd(val: float, unit: str) -> str:
     if unit == "USD":
         return f"${val:,.0f}"
     if unit == "USD/shares":
-        return f"${val:.2f}"
+        return f"${val:,.2f}"
     if unit == "shares" and abs(val) >= 1_000_000:
         return f"{val / 1_000_000:,.1f}M"
     return f"{val:,.0f}"
+
+
+def _is_nan(val: object) -> bool:
+    return isinstance(val, float) and math.isnan(val)
+
+
+def _concept_suffix(row: dict) -> str:
+    concept = str(row.get("standard_concept") or row.get("concept") or "")
+    return concept.split(":")[-1].split("_")[-1]
+
+
+def _statement_row_unit(row: dict) -> str:
+    suffix = _concept_suffix(row).lower()
+    label = str(row.get("label", "")).lower()
+    if "earningspershare" in suffix or "per share" in label:
+        return "USD/shares"
+    if (
+        "weightedaveragenumberof" in suffix
+        or "sharesoutstanding" in suffix
+        or "(in shares)" in label
+    ):
+        return "shares"
+    return "USD"
+
+
+def _pick_snapshot_rows(stmt_key: str, rows: List[dict], periods: List[str]) -> List[dict]:
+    """Curate and dedupe statement rows for readable snapshot output."""
+    priorities = {
+        "income_statement": [
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "Revenues",
+            "CostOfGoodsAndServicesSold",
+            "GrossProfit",
+            "OperatingIncomeLoss",
+            "IncomeBeforeTaxExpenseBenefit",
+            "NetIncomeLoss",
+            "EarningsPerShareBasic",
+            "EarningsPerShareDiluted",
+            "WeightedAverageNumberOfSharesOutstandingBasic",
+            "WeightedAverageNumberOfDilutedSharesOutstanding",
+        ],
+        "balance_sheet": [
+            "CashAndCashEquivalentsAtCarryingValue",
+            "MarketableSecuritiesCurrent",
+            "InventoryNet",
+            "AccountsReceivableNetCurrent",
+            "AssetsCurrent",
+            "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",
+            "Goodwill",
+            "IntangibleAssetsNetExcludingGoodwill",
+            "Assets",
+            "LiabilitiesCurrent",
+            "LongTermDebtNoncurrent",
+            "Liabilities",
+            "StockholdersEquity",
+        ],
+        "cashflow_statement": [
+            "NetIncomeLoss",
+            "DepreciationDepletionAndAmortization",
+            "ShareBasedCompensation",
+            "NetCashProvidedByUsedInOperatingActivities",
+            "PaymentsToAcquireProductiveAssets",
+            "NetCashProvidedByUsedInInvestingActivities",
+            "NetCashProvidedByUsedInFinancingActivities",
+            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        ],
+    }
+
+    filtered = []
+    for row in rows:
+        values = [row.get(p) for p in periods]
+        if not any(v is not None and not _is_nan(v) for v in values):
+            continue
+        filtered.append(row)
+
+    unique_by_concept = {}
+    fallback_unique = []
+    seen_labels = set()
+    for row in filtered:
+        suffix = _concept_suffix(row)
+        if suffix:
+            unique_by_concept.setdefault(suffix, row)
+        else:
+            label = str(row.get("label", ""))
+            if label and label not in seen_labels:
+                seen_labels.add(label)
+                fallback_unique.append(row)
+
+    selected = []
+    seen_row_ids = set()
+    for suffix in priorities.get(stmt_key, []):
+        row = unique_by_concept.get(suffix)
+        if row:
+            selected.append(row)
+            seen_row_ids.add(id(row))
+
+    if len(selected) >= 6:
+        return selected[:10]
+
+    for row in filtered + fallback_unique:
+        if id(row) in seen_row_ids:
+            continue
+        label = str(row.get("label", "")).lower()
+        if any(
+            token in label for token in [
+                "north america", "international", "aws", "united states",
+                "germany", "united kingdom", "japan", "rest of world",
+                "corporate", "1life", "other receivables", "vendor receivables",
+                "customer receivables", "retained earnings", "change in property",
+            ]
+        ):
+            continue
+        selected.append(row)
+        seen_row_ids.add(id(row))
+        if len(selected) >= 8:
+            break
+
+    return selected[:8]
 
 
 def register_sec_tools(server):
@@ -634,6 +755,7 @@ def register_sec_tools(server):
             ]
 
             any_found = False
+            notes = []
             for ticker in ticker_list:
                 result = edgar.get_financial_ttm(
                     ticker, concept=metric, unit=unit,
@@ -651,16 +773,20 @@ def register_sec_tools(server):
 
                 line = f"{ticker:<10}{val_str:>20}  {end_date:<14}{label}"
                 if result.get("note"):
-                    line += f"  [{result['note']}]"
+                    notes.append(f"{ticker}: {result['note']}")
                 lines.append(line)
 
             if not any_found:
                 return [TextContent(
                     type="text",
                     text=f"No TTM data found for {metric}.\n"
-                         f"Check that tickers file in US-GAAP format and "
+                         f"Check that tickers file XBRL-tagged reports and "
                          f"that the metric name is correct.",
                 )]
+
+            if notes:
+                lines.extend(["", "Notes:"])
+                lines.extend([f"  - {note}" for note in notes])
 
             return [TextContent(type="text", text="\n".join(lines))]
 
@@ -759,24 +885,27 @@ def register_sec_tools(server):
                     continue
 
                 lines.extend(["", f"── {stmt_title} ──"])
+                display_periods = periods[:3]
+                display_rows = _pick_snapshot_rows(stmt_key, rows, display_periods)
 
                 # Header row
                 header = f"{'Line Item':<45}"
-                for p in periods[:3]:  # max 3 periods for readability
+                for p in display_periods:
                     header += f"{p:>18}"
                 lines.append(header)
-                lines.append("-" * (45 + 18 * min(len(periods), 3)))
+                lines.append("-" * (45 + 18 * len(display_periods)))
 
-                for row in rows:
+                for row in display_rows:
                     label = row.get("label", "")
                     if len(label) > 43:
                         label = label[:40] + "..."
 
                     line = f"{label:<45}"
-                    for p in periods[:3]:
+                    unit_for_row = _statement_row_unit(row)
+                    for p in display_periods:
                         val = row.get(p)
-                        if val is not None:
-                            line += f"{_format_usd(float(val), 'USD'):>18}"
+                        if val is not None and not _is_nan(val):
+                            line += f"{_format_usd(float(val), unit_for_row):>18}"
                         else:
                             line += f"{'—':>18}"
                     lines.append(line)
