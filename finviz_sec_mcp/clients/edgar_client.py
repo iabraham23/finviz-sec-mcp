@@ -1727,6 +1727,7 @@ class EdgarClient:
                         entry = {
                             "label": row.get("label", ""),
                             "concept": row.get("concept", ""),
+                            "standard_concept": row.get("standard_concept", ""),
                         }
                         for d in date_cols:
                             entry[d] = row.get(d)
@@ -1743,6 +1744,25 @@ class EdgarClient:
             # Grab quick metrics — use get_financial_metrics() for the
             # full set, then patch any Nones with CF DataFrame fallback.
             try:
+                def _latest_stmt_value(stmt_name: str, concept_suffixes: List[str]) -> Any:
+                    stmt_data = result.get(stmt_name)
+                    if not stmt_data:
+                        return None
+                    stmt_rows = stmt_data.get("rows", [])
+                    stmt_periods = stmt_data.get("periods", [])
+                    latest_period = stmt_periods[0] if stmt_periods else None
+                    if not latest_period:
+                        return None
+                    suffix_set = set(concept_suffixes)
+                    for row in stmt_rows:
+                        concept = str(row.get("standard_concept") or row.get("concept") or "")
+                        suffix = concept.split(":")[-1].split("_")[-1]
+                        if suffix in suffix_set:
+                            val = row.get(latest_period)
+                            if val is not None and not (isinstance(val, float) and val != val):
+                                return val
+                    return None
+
                 base = financials.get_financial_metrics()
 
                 # edgartools' get_operating_cash_flow() returns None for
@@ -1775,21 +1795,64 @@ class EdgarClient:
                     if ocf is not None and fcf is None and capex is not None:
                         fcf = ocf - abs(capex)
 
+                revenue = _latest_stmt_value(
+                    "income_statement",
+                    ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"],
+                ) or base.get("revenue")
+                net_income = _latest_stmt_value(
+                    "income_statement", ["NetIncomeLoss"]
+                ) or base.get("net_income")
+                operating_income = _latest_stmt_value(
+                    "income_statement", ["OperatingIncomeLoss"]
+                ) or base.get("operating_income")
+                total_assets = _latest_stmt_value(
+                    "balance_sheet", ["Assets"]
+                ) or base.get("total_assets")
+                total_liabilities = _latest_stmt_value(
+                    "balance_sheet", ["Liabilities"]
+                ) or base.get("total_liabilities")
+                stockholders_equity = _latest_stmt_value(
+                    "balance_sheet", ["StockholdersEquity"]
+                ) or base.get("stockholders_equity")
+                current_assets = _latest_stmt_value(
+                    "balance_sheet", ["AssetsCurrent"]
+                ) or base.get("current_assets")
+                current_liabilities = _latest_stmt_value(
+                    "balance_sheet", ["LiabilitiesCurrent"]
+                ) or base.get("current_liabilities")
+
+                if (
+                    total_assets is not None
+                    and stockholders_equity is not None
+                    and total_assets >= stockholders_equity
+                ):
+                    implied_liabilities = total_assets - stockholders_equity
+                    if total_liabilities is None:
+                        total_liabilities = implied_liabilities
+                    else:
+                        asset_base = abs(total_assets) or 1.0
+                        if abs(implied_liabilities - total_liabilities) / asset_base > 0.05:
+                            total_liabilities = implied_liabilities
+
+                debt_to_assets = base.get("debt_to_assets")
+                if total_assets not in (None, 0) and total_liabilities is not None:
+                    debt_to_assets = total_liabilities / total_assets
+
                 result["quick_metrics"] = {
-                    "revenue": base.get("revenue"),
-                    "net_income": base.get("net_income"),
-                    "operating_income": base.get("operating_income"),
-                    "total_assets": base.get("total_assets"),
-                    "total_liabilities": base.get("total_liabilities"),
-                    "stockholders_equity": base.get("stockholders_equity"),
+                    "revenue": revenue,
+                    "net_income": net_income,
+                    "operating_income": operating_income,
+                    "total_assets": total_assets,
+                    "total_liabilities": total_liabilities,
+                    "stockholders_equity": stockholders_equity,
                     "operating_cash_flow": ocf,
                     "free_cash_flow": fcf,
                     "capital_expenditures": capex,
                     # New metrics from get_financial_metrics()
-                    "current_assets": base.get("current_assets"),
-                    "current_liabilities": base.get("current_liabilities"),
+                    "current_assets": current_assets,
+                    "current_liabilities": current_liabilities,
                     "current_ratio": base.get("current_ratio"),
-                    "debt_to_assets": base.get("debt_to_assets"),
+                    "debt_to_assets": debt_to_assets,
                     "shares_outstanding_basic": base.get("shares_outstanding_basic"),
                     "shares_outstanding_diluted": base.get("shares_outstanding_diluted"),
                 }
