@@ -1,0 +1,16 @@
+# Prefer for $500 daytrade (subset of nick_themes)
+ONDS
+SOUN
+SMR
+BBAI
+RCAT
+AI
+SNAP
+PATH
+CRNC
+ASAN
+RXRX
+RXT
+PUBM
+S
+PD
