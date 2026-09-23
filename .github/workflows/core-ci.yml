@@ -1,0 +1,93 @@
+name: Core CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+  push:
+    branches:
+      - main
+
+  # Lets you manually run this from the Actions tab too.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-ci:
+    name: Core CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Compile Python
+        run: |
+          python -m compileall -q finviz_sec_mcp
+
+      - name: Verify core MCP tools
+        run: |
+          python - <<'PY'
+          from finviz_sec_mcp.server import server
+
+          tools = set(server._tool_manager._tools.keys())
+
+          required = {
+              "screen_stocks",
+              "get_stock_fundamentals",
+              "compare_stocks",
+              "get_sec_filings",
+              "get_filing_text",
+              "get_financial_history",
+              "get_financial_snapshot",
+              "get_financial_ttm",
+              "get_stock_news",
+              "get_annual_price_history",
+              "get_inputs_tab_data",
+          }
+
+          missing = required - tools
+
+          if missing:
+              raise SystemExit(
+                  f"Missing required MCP tools: {sorted(missing)}"
+              )
+
+          print(f"{len(tools)} total tools registered.")
+          print("Core MCP tool contract intact.")
+          PY
+
+      - name: Start remote MCP and test health endpoint
+        run: |
+          finviz-sec-mcp-remote > /tmp/mcp.log 2>&1 &
+          MCP_PID=$!
+
+          for i in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:8000/healthz; then
+              echo
+              echo "Remote MCP health check passed."
+              kill $MCP_PID || true
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          echo "Remote MCP failed to become healthy."
+          cat /tmp/mcp.log
+          kill $MCP_PID || true
+          exit 1
