@@ -1,0 +1,24 @@
+# Liquid theme names for ORB / VWAP reclaim ($10+, avg vol class)
+# Intersect with nick_themes.txt + live scan hits
+PATH
+SNAP
+INTC
+SMCI
+PLTR
+NET
+ORCL
+FSLY
+GTLB
+ONDS
+SOUN
+AI
+BBAI
+AMD
+MU
+NVDA
+TSM
+CRM
+DDOG
+SNOW
+HPE
+CSCO

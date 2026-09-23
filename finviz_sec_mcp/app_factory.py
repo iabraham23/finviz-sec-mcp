@@ -17,6 +17,8 @@ from .tools.price_history import register_price_history_tools
 from .tools.screener import register_screener_tools
 from .tools.sec_filings import register_sec_tools
 from .tools.sector_analysis import register_sector_tools
+from .tools.social_chatter import register_social_chatter_tools
+from .tools.universe_monitor import register_universe_tools
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,8 @@ def register_all_tools(server: FastMCP) -> FastMCP:
     register_analyst_tools(server)
     register_price_history_tools(server)
     register_inputs_tab_tools(server)
+    register_social_chatter_tools(server)
+    register_universe_tools(server)
     return server
 
 def build_server(mode: Literal["local", "remote"] = "local") -> FastMCP:
